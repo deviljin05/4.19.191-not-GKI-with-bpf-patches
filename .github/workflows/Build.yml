@@ -12,9 +12,9 @@ on:
         required: true
         default: 'deprecated/android-4.19-stable'
       DEFCONFIG:
-        description: 'Defconfig name - see "List available defconfigs" step output to pick the right one, generic ACK only ships minimal/emulator configs, NOT your device SoC config'
+        description: 'Defconfig name - "defconfig" is the generic ACK 4.19 config (no device-specific drivers). Check the "List available defconfigs" step output if build fails.'
         required: true
-        default: 'cuttlefish_defconfig'
+        default: 'defconfig'
       DEVICE_NAME:
         description: 'Device codename (used for zip naming)'
         required: true
