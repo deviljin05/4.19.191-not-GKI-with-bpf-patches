@@ -1,0 +1,150 @@
+name: Build Custom Kernel (Non-GKI, BPF-enabled)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_REPO:
+        description: 'Kernel source repo URL'
+        required: true
+        default: 'https://github.com/your-username/your-kernel-repo'
+      KERNEL_BRANCH:
+        description: 'Kernel branch (e.g. lineage-19.1, 4.19)'
+        required: true
+        default: 'lineage-19.1'
+      DEFCONFIG:
+        description: 'Defconfig filename (without _defconfig suffix optional)'
+        required: true
+        default: 'vendor/your_device_defconfig'
+      DEVICE_NAME:
+        description: 'Device codename (used for zip naming)'
+        required: true
+        default: 'yourdevice'
+      ARCH:
+        description: 'Target architecture'
+        required: true
+        default: 'arm64'
+      TOOLCHAIN:
+        description: 'clang or gcc'
+        required: true
+        default: 'clang'
+      ANYKERNEL_REPO:
+        description: 'AnyKernel3 repo URL'
+        required: true
+        default: 'https://github.com/osm0sis/AnyKernel3'
+      ANYKERNEL_BRANCH:
+        description: 'AnyKernel3 branch matching your device'
+        required: true
+        default: 'master'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout workflow repo (for local patches folder, if any)
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf \
+            imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python-is-python3 llvm lld clang libc6-dev-i386
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 -b "${{ github.event.inputs.KERNEL_BRANCH }}" \
+            "${{ github.event.inputs.KERNEL_REPO }}" kernel_source
+
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 -b "${{ github.event.inputs.ANYKERNEL_BRANCH }}" \
+            "${{ github.event.inputs.ANYKERNEL_REPO }}" AnyKernel3
+
+      - name: Apply local BPF / boot-compat patches (optional)
+        run: |
+          if [ -d "patches" ]; then
+            cd kernel_source
+            for p in ../patches/*.patch; do
+              [ -e "$p" ] || continue
+              echo "Applying $p"
+              git apply --whitespace=fix "$p" || patch -p1 < "$p"
+            done
+          else
+            echo "No patches/ folder found in this repo, skipping."
+          fi
+
+      - name: Force-enable BPF configs required for GSI/ported ROM boot
+        run: |
+          cd kernel_source
+          CFG="arch/${{ github.event.inputs.ARCH }}/configs/${{ github.event.inputs.DEFCONFIG }}"
+          if [[ "$CFG" != *_defconfig ]]; then
+            CFG="${CFG}_defconfig"
+          fi
+          echo "Editing $CFG"
+          scripts/config --file "$CFG" \
+            -e BPF \
+            -e BPF_SYSCALL \
+            -e BPF_JIT \
+            -e HAVE_EBPF_JIT \
+            -e CGROUP_BPF \
+            -e BPF_EVENTS \
+            -e NETFILTER_XT_MATCH_BPF \
+            -e NET_CLS_BPF \
+            -e NET_ACT_BPF \
+            -e IKCONFIG \
+            -e IKCONFIG_PROC || true
+
+      - name: Set up toolchain
+        run: |
+          mkdir -p toolchains
+          if [ "${{ github.event.inputs.TOOLCHAIN }}" = "clang" ]; then
+            # AOSP prebuilt clang (adjust version/branch as needed for your kernel)
+            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchains/clang
+            echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang" >> $GITHUB_ENV
+          fi
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchains/gcc64
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchains/gcc32
+          echo "GCC64_PATH=$GITHUB_WORKSPACE/toolchains/gcc64" >> $GITHUB_ENV
+          echo "GCC32_PATH=$GITHUB_WORKSPACE/toolchains/gcc32" >> $GITHUB_ENV
+
+      - name: Build kernel
+        run: |
+          cd kernel_source
+          export ARCH=${{ github.event.inputs.ARCH }}
+          export SUBARCH=${{ github.event.inputs.ARCH }}
+          export KBUILD_BUILD_USER="ci"
+          export KBUILD_BUILD_HOST="github-actions"
+
+          if [ "${{ github.event.inputs.TOOLCHAIN }}" = "clang" ]; then
+            export PATH="$CLANG_PATH/clang-r*/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
+            MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
+          else
+            export PATH="$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
+            MAKE_ARGS="CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
+          fi
+
+          make O=out $MAKE_ARGS ${{ github.event.inputs.DEFCONFIG }}$( [[ "${{ github.event.inputs.DEFCONFIG }}" != *_defconfig ]] && echo "_defconfig" )
+          make O=out $MAKE_ARGS -j$(nproc --all)
+
+      - name: Package into AnyKernel3 zip
+        run: |
+          IMG=$(find kernel_source/out/arch/${{ github.event.inputs.ARCH }}/boot -maxdepth 1 -name "Image*" | head -n1)
+          DTB=$(find kernel_source/out/arch/${{ github.event.inputs.ARCH }}/boot -maxdepth 2 -iname "*.dtb" | head -n1)
+          cp "$IMG" AnyKernel3/Image.gz-dtb 2>/dev/null || cp "$IMG" AnyKernel3/Image
+          [ -n "$DTB" ] && cp "$DTB" AnyKernel3/dtb || true
+          cd AnyKernel3
+          ZIP_NAME="Kernel-${{ github.event.inputs.DEVICE_NAME }}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../$ZIP_NAME" . -x ".git*" "README.md"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 14
