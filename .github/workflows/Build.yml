@@ -1,38 +1,34 @@
-name: Build Custom Kernel (Non-GKI, BPF-enabled)
+name: Build 4.19 Non-GKI Kernel (Google ACK, BPF-enabled, ColorOS Port)
 
 on:
   workflow_dispatch:
     inputs:
       KERNEL_REPO:
-        description: 'Kernel source repo URL'
+        description: 'Google Android Common Kernel (ACK) - official, GPL source'
         required: true
-        default: 'https://github.com/your-username/your-kernel-repo'
+        default: 'https://android.googlesource.com/kernel/common'
       KERNEL_BRANCH:
-        description: 'Kernel branch (e.g. lineage-19.1, 4.19)'
+        description: 'ACK 4.19 non-GKI branch'
         required: true
-        default: 'lineage-19.1'
+        default: 'android-4.19'
       DEFCONFIG:
-        description: 'Defconfig filename (without _defconfig suffix optional)'
+        description: 'Defconfig name - see "List available defconfigs" step output to pick the right one, generic ACK only ships minimal/emulator configs, NOT your device SoC config'
         required: true
-        default: 'vendor/your_device_defconfig'
+        default: 'cuttlefish_defconfig'
       DEVICE_NAME:
         description: 'Device codename (used for zip naming)'
         required: true
-        default: 'yourdevice'
+        default: 'X6815C'
       ARCH:
         description: 'Target architecture'
         required: true
         default: 'arm64'
-      TOOLCHAIN:
-        description: 'clang or gcc'
-        required: true
-        default: 'clang'
       ANYKERNEL_REPO:
         description: 'AnyKernel3 repo URL'
         required: true
         default: 'https://github.com/osm0sis/AnyKernel3'
       ANYKERNEL_BRANCH:
-        description: 'AnyKernel3 branch matching your device'
+        description: 'AnyKernel3 branch'
         required: true
         default: 'master'
 
@@ -48,44 +44,50 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache curl flex \
-            g++-multilib gcc-multilib git gnupg gperf \
-            imagemagick lib32ncurses5-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush \
-            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python-is-python3 llvm lld clang libc6-dev-i386
+            git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
+            liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python-is-python3 llvm lld clang \
+            libc6-dev-i386 device-tree-compiler
 
-      - name: Clone kernel source
+      - name: Clone Google ACK 4.19 kernel source
         run: |
           git clone --depth=1 -b "${{ github.event.inputs.KERNEL_BRANCH }}" \
             "${{ github.event.inputs.KERNEL_REPO }}" kernel_source
+
+      - name: List available defconfigs (IMPORTANT - confirm correct DEFCONFIG name before real run)
+        run: |
+          find kernel_source -path "*/configs/*defconfig*" | head -n 60
 
       - name: Clone AnyKernel3
         run: |
           git clone --depth=1 -b "${{ github.event.inputs.ANYKERNEL_BRANCH }}" \
             "${{ github.event.inputs.ANYKERNEL_REPO }}" AnyKernel3
 
-      - name: Apply local BPF / boot-compat patches (optional)
+      - name: Apply local patches (optional, from patches/ folder in this repo)
         run: |
-          if [ -d "patches" ]; then
+          if [ -d "patches" ] && [ -n "$(ls -A patches/*.patch 2>/dev/null)" ]; then
             cd kernel_source
             for p in ../patches/*.patch; do
-              [ -e "$p" ] || continue
               echo "Applying $p"
               git apply --whitespace=fix "$p" || patch -p1 < "$p"
             done
           else
-            echo "No patches/ folder found in this repo, skipping."
+            echo "No patches/*.patch found, skipping."
           fi
 
-      - name: Force-enable BPF configs required for GSI/ported ROM boot
+      - name: Verify / force-enable BPF configs (needed for ColorOS-ported ROM netd/network on Android 10+)
         run: |
           cd kernel_source
-          CFG="arch/${{ github.event.inputs.ARCH }}/configs/${{ github.event.inputs.DEFCONFIG }}"
-          if [[ "$CFG" != *_defconfig ]]; then
-            CFG="${CFG}_defconfig"
+          CFG=$(find . -path "*/configs/${{ github.event.inputs.DEFCONFIG }}" | head -n1)
+          if [ -z "$CFG" ]; then
+            echo "ERROR: defconfig '${{ github.event.inputs.DEFCONFIG }}' not found in this branch."
+            echo "Check the 'List available defconfigs' step output above and re-run with a valid name."
+            exit 1
           fi
-          echo "Editing $CFG"
+          echo "Using defconfig: $CFG"
           scripts/config --file "$CFG" \
             -e BPF \
             -e BPF_SYSCALL \
@@ -98,15 +100,14 @@ jobs:
             -e NET_ACT_BPF \
             -e IKCONFIG \
             -e IKCONFIG_PROC || true
+          grep -E "CONFIG_BPF|CONFIG_CGROUP_BPF" "$CFG"
 
-      - name: Set up toolchain
+      - name: Set up toolchain (Clang + GCC, AOSP prebuilt)
         run: |
           mkdir -p toolchains
-          if [ "${{ github.event.inputs.TOOLCHAIN }}" = "clang" ]; then
-            # AOSP prebuilt clang (adjust version/branch as needed for your kernel)
-            git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchains/clang
-            echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang" >> $GITHUB_ENV
-          fi
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchains/clang
+          CLANG_BIN=$(find toolchains/clang -maxdepth 1 -type d -name "clang-r*" | head -n1)
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/$CLANG_BIN/bin" >> $GITHUB_ENV
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchains/gcc64
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchains/gcc32
           echo "GCC64_PATH=$GITHUB_WORKSPACE/toolchains/gcc64" >> $GITHUB_ENV
@@ -119,26 +120,18 @@ jobs:
           export SUBARCH=${{ github.event.inputs.ARCH }}
           export KBUILD_BUILD_USER="ci"
           export KBUILD_BUILD_HOST="github-actions"
+          export PATH="$CLANG_BIN:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
+          MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
 
-          if [ "${{ github.event.inputs.TOOLCHAIN }}" = "clang" ]; then
-            export PATH="$CLANG_PATH/clang-r*/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-            MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
-          else
-            export PATH="$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-            MAKE_ARGS="CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
-          fi
-
-          make O=out $MAKE_ARGS ${{ github.event.inputs.DEFCONFIG }}$( [[ "${{ github.event.inputs.DEFCONFIG }}" != *_defconfig ]] && echo "_defconfig" )
+          make O=out $MAKE_ARGS ${{ github.event.inputs.DEFCONFIG }}
           make O=out $MAKE_ARGS -j$(nproc --all)
 
       - name: Package into AnyKernel3 zip
         run: |
           IMG=$(find kernel_source/out/arch/${{ github.event.inputs.ARCH }}/boot -maxdepth 1 -name "Image*" | head -n1)
-          DTB=$(find kernel_source/out/arch/${{ github.event.inputs.ARCH }}/boot -maxdepth 2 -iname "*.dtb" | head -n1)
           cp "$IMG" AnyKernel3/Image.gz-dtb 2>/dev/null || cp "$IMG" AnyKernel3/Image
-          [ -n "$DTB" ] && cp "$DTB" AnyKernel3/dtb || true
           cd AnyKernel3
-          ZIP_NAME="Kernel-${{ github.event.inputs.DEVICE_NAME }}-$(date +%Y%m%d-%H%M).zip"
+          ZIP_NAME="ACK419-Kernel-${{ github.event.inputs.DEVICE_NAME }}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP_NAME" . -x ".git*" "README.md"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
