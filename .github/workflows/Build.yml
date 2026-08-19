@@ -8,9 +8,9 @@ on:
         required: true
         default: 'https://android.googlesource.com/kernel/common'
       KERNEL_BRANCH:
-        description: 'ACK 4.19 non-GKI branch'
+        description: 'ACK 4.19 non-GKI branch (now under deprecated/ prefix)'
         required: true
-        default: 'android-4.19'
+        default: 'deprecated/android-4.19-stable'
       DEFCONFIG:
         description: 'Defconfig name - see "List available defconfigs" step output to pick the right one, generic ACK only ships minimal/emulator configs, NOT your device SoC config'
         required: true
