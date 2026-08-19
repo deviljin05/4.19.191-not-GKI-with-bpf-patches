@@ -102,16 +102,12 @@ jobs:
             -e IKCONFIG_PROC || true
           grep -E "CONFIG_BPF|CONFIG_CGROUP_BPF" "$CFG"
 
-      - name: Set up toolchain (Clang + GCC, AOSP prebuilt)
+      - name: Set up Clang toolchain (AOSP prebuilt, LLVM full toolchain - no external binutils needed)
         run: |
           mkdir -p toolchains
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchains/clang
           CLANG_BIN=$(find toolchains/clang -maxdepth 1 -type d -name "clang-r*" | head -n1)
           echo "CLANG_BIN=$GITHUB_WORKSPACE/$CLANG_BIN/bin" >> $GITHUB_ENV
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchains/gcc64
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchains/gcc32
-          echo "GCC64_PATH=$GITHUB_WORKSPACE/toolchains/gcc64" >> $GITHUB_ENV
-          echo "GCC32_PATH=$GITHUB_WORKSPACE/toolchains/gcc32" >> $GITHUB_ENV
 
       - name: Build kernel
         run: |
@@ -120,8 +116,10 @@ jobs:
           export SUBARCH=${{ github.event.inputs.ARCH }}
           export KBUILD_BUILD_USER="ci"
           export KBUILD_BUILD_HOST="github-actions"
-          export PATH="$CLANG_BIN:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GCC32_PATH/bin/arm-linux-androideabi-"
+          export PATH="$CLANG_BIN:$PATH"
+          export LLVM=1
+          export LLVM_IAS=1
+          MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
 
           make O=out $MAKE_ARGS ${{ github.event.inputs.DEFCONFIG }}
           make O=out $MAKE_ARGS -j$(nproc --all)
