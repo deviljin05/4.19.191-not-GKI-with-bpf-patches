@@ -53,8 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
             git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
-            device-tree-compiler python3 python3-pip cpio \
-            crossbuild-essential-arm64 crossbuild-essential-armhf
+            device-tree-compiler python3 python3-pip cpio
 
       - name: Get Original Boot Image
         run: |
@@ -67,8 +66,6 @@ jobs:
             echo "Downloading boot_original.img from provided URL..."
 
             if echo "$URL" | grep -q "drive.google.com"; then
-              # Google Drive share links need gdown (handles the confirmation-page /
-              # virus-scan-warning redirect that plain curl can't get past)
               FILE_ID=$(echo "$URL" | grep -oP '(?<=/d/)[^/]+' || echo "$URL" | grep -oP '(?<=id=)[^&]+')
               echo "Detected Google Drive link, file ID: $FILE_ID"
               gdown "https://drive.google.com/uc?id=$FILE_ID" -O boot_original.img
@@ -90,6 +87,10 @@ jobs:
         run: |
           git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
 
+      - name: Download Stable Proton Clang Compiler
+        run: |
+          git clone https://github.com/kdrag0n/proton-clang --depth=1 toolchain
+
       - name: List Available Defconfigs (diagnostic)
         run: |
           cd source
@@ -99,7 +100,6 @@ jobs:
       - name: Auto-Inject eBPF & Port ROM Patches to Defconfig
         run: |
           cd source
-          # Confirmed working defconfig name for this build (update here if it changes)
           TARGET_CONFIG="arch/arm64/configs/pissarro_defconfig"
 
           if [ -f "$TARGET_CONFIG" ]; then
@@ -125,6 +125,16 @@ jobs:
             echo "CONFIG_PID_NS=y" >> $TARGET_CONFIG
             echo "CONFIG_NET_NS=y" >> $TARGET_CONFIG
             echo "# CONFIG_DM_VERITY_FEC is not set" >> $TARGET_CONFIG
+
+            echo "# --- Disable APUSYS (AI processing unit) driver ---" >> $TARGET_CONFIG
+            echo "# This subsystem's tracepoint headers (mnoc_met_events.h) hit a" >> $TARGET_CONFIG
+            echo "# real 'undeclared identifier' compile error unrelated to compiler" >> $TARGET_CONFIG
+            echo "# choice, and we don't need NPU/AI-accelerator support for a" >> $TARGET_CONFIG
+            echo "# working phone kernel, so we disable it outright." >> $TARGET_CONFIG
+            echo "# CONFIG_MTK_APUSYS_SUPPORT is not set" >> $TARGET_CONFIG
+            echo "# CONFIG_MTK_APUSYS is not set" >> $TARGET_CONFIG
+            echo "# CONFIG_MTK_APU_SUPPORT is not set" >> $TARGET_CONFIG
+
             echo "Successfully injected patches into pissarro_defconfig."
           else
             echo "ERROR: Base config file not found! Check the diagnostic step output above."
@@ -134,28 +144,30 @@ jobs:
       - name: Compile Custom Kernel Image
         run: |
           cd source
-          # Switched from proton-clang (CC=clang) to the native GCC cross
-          # toolchain. This Xiaomi MT6893 tree is legacy MediaTek vendor code
-          # (drivers/misc/mediatek/..., UFS, touchscreen, etc.) that was
-          # written/validated against GCC, not clang — clang's stricter
-          # checking (-Werror on implicit declarations, macro/enum handling
-          # differences) kept breaking on unrelated driver files one after
-          # another (touchscreen, UFS, APUSYS...). GCC avoids this whole
-          # class of errors since it's what the vendor tree actually expects.
+          # toolchain goes AFTER the system PATH, not before: plain "gcc"/"ld"
+          # (used to build HOST tools like fixdep, which run on the runner
+          # itself) must resolve to the runner's own up-to-date binutils.
+          # proton-clang's bundled ld is older and chokes on the runner's
+          # newer glibc (.relr.dyn RELR sections) if picked up for host
+          # builds. The aarch64-linux-gnu-* cross tools are uniquely named
+          # (no system equivalent), so they still resolve correctly from
+          # toolchain/bin even at the end of PATH.
+          export PATH="$PATH:$(pwd)/../toolchain/bin"
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Belt-and-suspenders: still relax implicit-function-declaration to
-          # a warning in case any file still trips it under GCC.
+          # Relax implicit-function-declaration from a hard error (-Werror)
+          # back to a warning — some legacy vendor driver files (e.g. the
+          # bundled Goodix touchscreen driver) are missing an include that
+          # clang treats more strictly than GCC did originally.
           export KCFLAGS="-Wno-error=implicit-function-declaration"
 
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- pissarro_defconfig
-          # Build only Image.gz — we don't need a freshly built dtbo.img here
-          # (we reuse the ORIGINAL device's dtb/dtbo straight from
-          # boot_original.img during the repack step later). This also avoids
-          # a separate failure where the dtbo.img build step calls "python2",
-          # which isn't installed on modern Ubuntu runners.
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- -j$(nproc) Image.gz
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
+          # Build only Image.gz — we reuse the ORIGINAL device's dtb/dtbo
+          # straight from boot_original.img during the repack step later, so
+          # we don't need a freshly built dtbo.img (which also fails here
+          # since it calls "python2", not installed on modern Ubuntu).
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz
 
       - name: Check Kernel Compilation Output
         run: |
@@ -169,7 +181,6 @@ jobs:
 
       - name: Unpack Original Boot Image
         run: |
-          # AOSP's unpack_bootimg / mkbootimg scripts (works across boot header versions)
           git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg_tools
 
           mkdir -p unpacked
@@ -182,9 +193,6 @@ jobs:
 
       - name: Repack Boot Image with New Kernel
         run: |
-          # Use the ORIGINAL ramdisk and DTB (unchanged — these are device-specific
-          # and came straight from your real Infinix Zero 5G 2023 boot.img), paired
-          # with the NEWLY compiled kernel.
           NEW_KERNEL="source/out/arch/arm64/boot/Image.gz"
 
           if [ ! -f "$NEW_KERNEL" ]; then
@@ -192,9 +200,6 @@ jobs:
             exit 1
           fi
 
-          # repack_args.txt (from unpack_bootimg.py --format mkbootimg) contains the
-          # exact mkbootimg invocation used to reproduce the original header. We swap
-          # out --kernel to point at our new build and keep everything else identical.
           REPACK_CMD=$(cat unpacked/repack_args.txt | sed "s#--kernel [^ ]*#--kernel $NEW_KERNEL#")
 
           echo "=== Final repack command ==="
