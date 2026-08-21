@@ -241,11 +241,13 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Relax implicit-function-declaration from a hard error (-Werror)
-          # back to a warning — some legacy vendor driver files (e.g. the
-          # bundled Goodix touchscreen driver) are missing an include that
-          # clang treats more strictly than GCC did originally.
-          export KCFLAGS="-Wno-error=implicit-function-declaration"
+          # Relax implicit-function-declaration and unused-function from hard
+          # errors (-Werror) back to warnings — some legacy vendor driver
+          # files (e.g. the bundled Goodix touchscreen driver, and the
+          # resym performance-monitoring module) are missing an include or
+          # have intentionally-unused static helpers that clang treats more
+          # strictly as errors than GCC did originally.
+          export KCFLAGS="-Wno-error=implicit-function-declaration -Wno-error=unused-function"
 
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
           # Build only Image.gz — we reuse the ORIGINAL device's dtb/dtbo
