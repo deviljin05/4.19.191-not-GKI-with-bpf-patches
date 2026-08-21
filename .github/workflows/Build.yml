@@ -185,6 +185,47 @@ jobs:
             done
           fi
 
+      - name: Patch missing vpu_dvfs.h (eara_thermal depends on disabled APUSYS)
+        run: |
+          cd source
+          # Root cause: vpu_dvfs.h only ever shipped as part of the APUSYS
+          # (AI processing unit) driver package. This defconfig deliberately
+          # disables APUSYS (# CONFIG_MTK_APUSYS_SUPPORT is not set, injected
+          # earlier in this workflow), which also means the Kbuild include
+          # path that normally exposes vpu_dvfs.h (-I<apusys>/include) is
+          # never added. drivers/misc/mediatek/performance/eara_thermal/src/
+          # thermal_budget.c includes it unconditionally regardless of that
+          # config, so it fails with "file not found" as soon as APUSYS is
+          # off. eara_thermal is a thermal-throttling helper for AI/VPU
+          # workloads — irrelevant once APUSYS itself isn't built.
+          echo "=== Searching for vpu_dvfs.h anywhere in tree ==="
+          FOUND=$(find . -name "vpu_dvfs.h" 2>/dev/null | head -n1 || true)
+
+          if [ -n "$FOUND" ]; then
+            echo "Found vpu_dvfs.h at: $FOUND — adding its directory to eara_thermal's include path."
+            HDR_DIR=$(dirname "$FOUND")
+            MAKEFILE="drivers/misc/mediatek/performance/eara_thermal/src/Makefile"
+            if [ -f "$MAKEFILE" ]; then
+              echo "ccflags-y += -I\$(srctree)/$HDR_DIR" >> "$MAKEFILE"
+              echo "Patched $MAKEFILE with include path."
+            else
+              echo "WARNING: expected Makefile not found at $MAKEFILE, could not patch include path."
+            fi
+          else
+            echo "vpu_dvfs.h not found anywhere in the tree (expected, since APUSYS"
+            echo "is disabled). Excluding eara_thermal from the build instead."
+            PATCHED=0
+            for f in $(grep -rl "eara_thermal" drivers/misc/mediatek/performance/Makefile* 2>/dev/null); do
+              sed -i '/eara_thermal/ s/^/#/' "$f"
+              echo "Commented out eara_thermal reference in $f"
+              PATCHED=1
+            done
+            if [ "$PATCHED" -eq 0 ]; then
+              echo "WARNING: could not find an 'eara_thermal' reference to comment out."
+              echo "The build may still fail on this file — check the tree structure."
+            fi
+          fi
+
       - name: Compile Custom Kernel Image
         run: |
           cd source
