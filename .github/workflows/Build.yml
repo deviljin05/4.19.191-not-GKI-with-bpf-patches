@@ -53,7 +53,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
             git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
-            device-tree-compiler python3 python3-pip cpio
+            device-tree-compiler python3 python3-pip cpio \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Get Original Boot Image
         run: |
@@ -88,11 +89,6 @@ jobs:
       - name: Clone Verified MT6893 Kernel Source
         run: |
           git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
-
-      - name: Download Stable Proton Clang Compiler
-        run: |
-          # NOTE: verify this is the toolchain you actually want; swap the URL if you have a different one
-          git clone https://github.com/kdrag0n/proton-clang --depth=1 toolchain
 
       - name: List Available Defconfigs (diagnostic)
         run: |
@@ -138,32 +134,28 @@ jobs:
       - name: Compile Custom Kernel Image
         run: |
           cd source
-          # IMPORTANT: toolchain goes AFTER the system PATH, not before.
-          # Reason: plain "gcc"/"ld" (used to build HOST tools like fixdep, which
-          # run on the GitHub Actions runner itself) must resolve to the runner's
-          # own up-to-date binutils. proton-clang's bundled ld is older and
-          # chokes on the runner's newer glibc (.relr.dyn RELR sections) when
-          # accidentally picked up for host builds.
-          # The aarch64-linux-gnu-* cross tools are uniquely named (no system
-          # equivalent), so they still resolve correctly from toolchain/bin even
-          # at the end of PATH.
-          export PATH="$PATH:$(pwd)/../toolchain/bin"
+          # Switched from proton-clang (CC=clang) to the native GCC cross
+          # toolchain. This Xiaomi MT6893 tree is legacy MediaTek vendor code
+          # (drivers/misc/mediatek/..., UFS, touchscreen, etc.) that was
+          # written/validated against GCC, not clang — clang's stricter
+          # checking (-Werror on implicit declarations, macro/enum handling
+          # differences) kept breaking on unrelated driver files one after
+          # another (touchscreen, UFS, APUSYS...). GCC avoids this whole
+          # class of errors since it's what the vendor tree actually expects.
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # KCFLAGS: clang treats some legacy driver warnings (e.g. missing
-          # ktime_get_boot_ns declaration in bundled touchscreen drivers) as
-          # hard errors under -Werror. Downgrade that specific class back to
-          # a warning so unrelated legacy driver code doesn't block the build.
+          # Belt-and-suspenders: still relax implicit-function-declaration to
+          # a warning in case any file still trips it under GCC.
           export KCFLAGS="-Wno-error=implicit-function-declaration"
 
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- pissarro_defconfig
           # Build only Image.gz — we don't need a freshly built dtbo.img here
           # (we reuse the ORIGINAL device's dtb/dtbo straight from
           # boot_original.img during the repack step later). This also avoids
           # a separate failure where the dtbo.img build step calls "python2",
           # which isn't installed on modern Ubuntu runners.
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- -j$(nproc) Image.gz
 
       - name: Check Kernel Compilation Output
         run: |
