@@ -1,19 +1,26 @@
 name: Build Infinix Zero 5G 2023 Custom Kernel
 on:
   workflow_dispatch:
+    inputs:
+      boot_img_url:
+        description: 'Direct link or Google Drive share link to your original boot.img'
+        required: false
+        default: 'https://drive.google.com/file/d/1p8teKTyefbW5VNIpMSZdXMqvVNfQ8fUI/view?usp=drive_link'
 
 # ============================================================================
-# SETUP REQUIRED BEFORE RUNNING THIS WORKFLOW:
+# HOW TO PROVIDE YOUR ORIGINAL BOOT IMAGE (pick ONE):
 #
-# Commit your ORIGINAL, UNMODIFIED Infinix Zero 5G 2023 boot.img to the repo
-# root as:  boot_original.img
+# Option A (recommended for big files): upload boot.img as a GitHub Release
+# asset (Releases support up to 2GB, no Git LFS needed), copy its direct
+# download link, and paste that link into the "boot_img_url" input when you
+# run this workflow (Actions tab -> Run workflow).
 #
-# This workflow unpacks it itself to pull out the original ramdisk, DTB, and
-# header arguments (cmdline, base address, page size, offsets, etc.) so the
-# final repacked boot.img matches what your device actually expects. You do
-# NOT need to separately commit dtb / ramdisk.cpio / kernel — those get
-# extracted fresh from boot_original.img during the run, which avoids any
-# format mismatch (compressed vs raw cpio, etc.) from manual extraction.
+# Option B: commit the file to the repo root yourself as boot_original.img
+# and leave boot_img_url blank.
+#
+# Either way, this workflow unpacks it to pull out the original ramdisk,
+# DTB, and header arguments (cmdline, base address, page size, offsets,
+# etc.) so the final repacked boot.img matches what your device expects.
 # ============================================================================
 
 jobs:
@@ -39,14 +46,35 @@ jobs:
             git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
             device-tree-compiler python3 python3-pip cpio
 
-      - name: Verify Original Boot Image Present
+      - name: Get Original Boot Image
         run: |
-          if [ ! -f "boot_original.img" ]; then
-            echo "ERROR: boot_original.img not found in repo root."
-            echo "Commit your original Infinix Zero 5G 2023 boot.img as 'boot_original.img' and re-run."
+          pip install --break-system-packages --quiet gdown
+
+          if [ -f "boot_original.img" ]; then
+            echo "Found boot_original.img already in repo ($(du -h boot_original.img | cut -f1))"
+          elif [ -n "${{ github.event.inputs.boot_img_url }}" ]; then
+            URL="${{ github.event.inputs.boot_img_url }}"
+            echo "Downloading boot_original.img from provided URL..."
+
+            if echo "$URL" | grep -q "drive.google.com"; then
+              # Google Drive share links need gdown (handles the confirmation-page /
+              # virus-scan-warning redirect that plain curl can't get past)
+              FILE_ID=$(echo "$URL" | grep -oP '(?<=/d/)[^/]+' || echo "$URL" | grep -oP '(?<=id=)[^&]+')
+              echo "Detected Google Drive link, file ID: $FILE_ID"
+              gdown "https://drive.google.com/uc?id=$FILE_ID" -O boot_original.img
+            else
+              curl -L "$URL" -o boot_original.img
+            fi
+
+            if [ ! -s "boot_original.img" ]; then
+              echo "ERROR: download failed or produced an empty file."
+              exit 1
+            fi
+            echo "Downloaded boot_original.img ($(du -h boot_original.img | cut -f1))"
+          else
+            echo "ERROR: boot_original.img not found in repo, and no boot_img_url input was provided."
             exit 1
           fi
-          echo "Found boot_original.img ($(du -h boot_original.img | cut -f1))"
 
       - name: Clone Verified MT6893 Kernel Source
         run: |
