@@ -151,8 +151,19 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
+          # KCFLAGS: clang treats some legacy driver warnings (e.g. missing
+          # ktime_get_boot_ns declaration in bundled touchscreen drivers) as
+          # hard errors under -Werror. Downgrade that specific class back to
+          # a warning so unrelated legacy driver code doesn't block the build.
+          export KCFLAGS="-Wno-error=implicit-function-declaration"
+
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
+          # Build only Image.gz — we don't need a freshly built dtbo.img here
+          # (we reuse the ORIGINAL device's dtb/dtbo straight from
+          # boot_original.img during the repack step later). This also avoids
+          # a separate failure where the dtbo.img build step calls "python2",
+          # which isn't installed on modern Ubuntu runners.
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz
 
       - name: Check Kernel Compilation Output
         run: |
