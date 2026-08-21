@@ -76,8 +76,11 @@ jobs:
           export SUBARCH=arm64
 
           # Making configurations and building kernel binary
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
+          # HOSTCC/HOSTLD forced to the runner's own gcc/ld so host-side build
+          # tools (fixdep, etc.) don't get linked with proton-clang's bundled
+          # (older) ld, which chokes on the runner's newer glibc RELR sections.
+          make O=out HOSTCC=/usr/bin/gcc HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
+          make O=out HOSTCC=/usr/bin/gcc HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
       - name: Check and Package Output Artifact
         run: |
           cd source/out/arch/arm64/boot/
