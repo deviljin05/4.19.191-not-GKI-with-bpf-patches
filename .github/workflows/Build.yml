@@ -54,7 +54,7 @@ jobs:
           sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
             git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
             device-tree-compiler python3 python3-pip cpio \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabi
+            crossbuild-essential-arm64 crossbuild-essential-armhf
 
       - name: Get Original Boot Image
         run: |
@@ -149,13 +149,13 @@ jobs:
           # a warning in case any file still trips it under GCC.
           export KCFLAGS="-Wno-error=implicit-function-declaration"
 
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- pissarro_defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- pissarro_defconfig
           # Build only Image.gz — we don't need a freshly built dtbo.img here
           # (we reuse the ORIGINAL device's dtb/dtbo straight from
           # boot_original.img during the repack step later). This also avoids
           # a separate failure where the dtbo.img build step calls "python2",
           # which isn't installed on modern Ubuntu runners.
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- -j$(nproc) Image.gz
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- -j$(nproc) Image.gz
 
       - name: Check Kernel Compilation Output
         run: |
