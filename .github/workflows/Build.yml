@@ -1,10 +1,28 @@
 name: Build Infinix Zero 5G 2023 Custom Kernel
 on:
   workflow_dispatch:
+
+# ============================================================================
+# SETUP REQUIRED BEFORE RUNNING THIS WORKFLOW:
+#
+# Commit your ORIGINAL, UNMODIFIED Infinix Zero 5G 2023 boot.img to the repo
+# root as:  boot_original.img
+#
+# This workflow unpacks it itself to pull out the original ramdisk, DTB, and
+# header arguments (cmdline, base address, page size, offsets, etc.) so the
+# final repacked boot.img matches what your device actually expects. You do
+# NOT need to separately commit dtb / ramdisk.cpio / kernel — those get
+# extracted fresh from boot_original.img during the run, which avoids any
+# format mismatch (compressed vs raw cpio, etc.) from manual extraction.
+# ============================================================================
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
@@ -13,30 +31,42 @@ jobs:
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
+            device-tree-compiler python3 python3-pip cpio
+
+      - name: Verify Original Boot Image Present
+        run: |
+          if [ ! -f "boot_original.img" ]; then
+            echo "ERROR: boot_original.img not found in repo root."
+            echo "Commit your original Infinix Zero 5G 2023 boot.img as 'boot_original.img' and re-run."
+            exit 1
+          fi
+          echo "Found boot_original.img ($(du -h boot_original.img | cut -f1))"
+
       - name: Clone Verified MT6893 Kernel Source
         run: |
-          # Xiaomi MT6893 kernel source
           git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
+
       - name: Download Stable Proton Clang Compiler
         run: |
-          # Android 4.19 architecture optimized compiler
-          # NOTE: verify this is the toolchain you actually want to use; swap the URL if you have a different one
+          # NOTE: verify this is the toolchain you actually want; swap the URL if you have a different one
           git clone https://github.com/kdrag0n/proton-clang --depth=1 toolchain
+
       - name: List Available Defconfigs (diagnostic)
         run: |
           cd source
           echo "=== Available defconfigs in this source tree ==="
           ls -la arch/arm64/configs/
+
       - name: Auto-Inject eBPF & Port ROM Patches to Defconfig
         run: |
           cd source
-          # NOTE: "pissarro_defconfig" was the Infinix codename — this almost
-          # certainly does NOT exist in the Xiaomi tree. Check the "List Available
-          # Defconfigs" step output above, then update TARGET_CONFIG to the real name.
+          # Confirmed working defconfig name for this build (update here if it changes)
           TARGET_CONFIG="arch/arm64/configs/pissarro_defconfig"
 
           if [ -f "$TARGET_CONFIG" ]; then
@@ -64,34 +94,89 @@ jobs:
             echo "# CONFIG_DM_VERITY_FEC is not set" >> $TARGET_CONFIG
             echo "Successfully injected patches into pissarro_defconfig."
           else
-            echo "ERROR: Base config file not found! Check TARGET_CONFIG path above."
+            echo "ERROR: Base config file not found! Check the diagnostic step output above."
             exit 1
           fi
+
       - name: Compile Custom Kernel Image
         run: |
           cd source
-          # Compiler binaries path settings
-          export PATH="$(pwd)/../toolchain/bin:$PATH"
+          # IMPORTANT: toolchain goes AFTER the system PATH, not before.
+          # Reason: plain "gcc"/"ld" (used to build HOST tools like fixdep, which
+          # run on the GitHub Actions runner itself) must resolve to the runner's
+          # own up-to-date binutils. proton-clang's bundled ld is older and
+          # chokes on the runner's newer glibc (.relr.dyn RELR sections) when
+          # accidentally picked up for host builds.
+          # The aarch64-linux-gnu-* cross tools are uniquely named (no system
+          # equivalent), so they still resolve correctly from toolchain/bin even
+          # at the end of PATH.
+          export PATH="$PATH:$(pwd)/../toolchain/bin"
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Making configurations and building kernel binary
-          # HOSTCC/HOSTLD forced to the runner's own gcc/ld so host-side build
-          # tools (fixdep, etc.) don't get linked with proton-clang's bundled
-          # (older) ld, which chokes on the runner's newer glibc RELR sections.
-          make O=out HOSTCC=/usr/bin/gcc HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
-          make O=out HOSTCC=/usr/bin/gcc HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
-      - name: Check and Package Output Artifact
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
+
+      - name: Check Kernel Compilation Output
         run: |
           cd source/out/arch/arm64/boot/
           if [ -f "Image.gz" ]; then
-            echo "Compilation successful! Ready to package."
+            echo "Compilation successful!"
           else
             echo "ERROR: Kernel binary compilation failed!"
             exit 1
           fi
-      - name: Upload Flashable Kernel Image
+
+      - name: Unpack Original Boot Image
+        run: |
+          # AOSP's unpack_bootimg / mkbootimg scripts (works across boot header versions)
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg_tools
+
+          mkdir -p unpacked
+          python3 mkbootimg_tools/unpack_bootimg.py --boot_img boot_original.img --out unpacked --format mkbootimg | tee unpacked/repack_args.txt
+
+          echo "=== Unpacked contents ==="
+          ls -la unpacked/
+          echo "=== Captured repack arguments ==="
+          cat unpacked/repack_args.txt
+
+      - name: Repack Boot Image with New Kernel
+        run: |
+          # Use the ORIGINAL ramdisk and DTB (unchanged — these are device-specific
+          # and came straight from your real Infinix Zero 5G 2023 boot.img), paired
+          # with the NEWLY compiled kernel.
+          NEW_KERNEL="source/out/arch/arm64/boot/Image.gz"
+
+          if [ ! -f "$NEW_KERNEL" ]; then
+            echo "ERROR: new kernel image not found at $NEW_KERNEL"
+            exit 1
+          fi
+
+          # repack_args.txt (from unpack_bootimg.py --format mkbootimg) contains the
+          # exact mkbootimg invocation used to reproduce the original header. We swap
+          # out --kernel to point at our new build and keep everything else identical.
+          REPACK_CMD=$(cat unpacked/repack_args.txt | sed "s#--kernel [^ ]*#--kernel $NEW_KERNEL#")
+
+          echo "=== Final repack command ==="
+          echo "python3 mkbootimg_tools/mkbootimg.py $REPACK_CMD --output boot_new.img"
+
+          python3 mkbootimg_tools/mkbootimg.py $REPACK_CMD --output boot_new.img
+
+          if [ -f "boot_new.img" ]; then
+            echo "boot_new.img created successfully ($(du -h boot_new.img | cut -f1))"
+          else
+            echo "ERROR: repack failed, boot_new.img not produced"
+            exit 1
+          fi
+
+      - name: Upload Kernel Image Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Infinix-Zero-5G-2023-Kernel-Image
           path: source/out/arch/arm64/boot/Image.gz
+
+      - name: Upload Flashable Boot Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Infinix-Zero-5G-2023-boot-new
+          path: boot_new.img
