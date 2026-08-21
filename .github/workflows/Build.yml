@@ -1,141 +1,94 @@
-name: Build 4.19 Non-GKI Kernel (Google ACK, BPF-enabled, ColorOS Port)
-
+name: Build Infinix Zero 5G 2023 Custom Kernel
 on:
   workflow_dispatch:
-    inputs:
-      KERNEL_REPO:
-        description: 'Google Android Common Kernel (ACK) - official, GPL source'
-        required: true
-        default: 'https://android.googlesource.com/kernel/common'
-      KERNEL_BRANCH:
-        description: 'ACK 4.19 non-GKI branch (now under deprecated/ prefix)'
-        required: true
-        default: 'deprecated/android-4.19-stable'
-      DEFCONFIG:
-        description: 'Defconfig name - "defconfig" is the generic ACK 4.19 config (no device-specific drivers). Check the "List available defconfigs" step output if build fails.'
-        required: true
-        default: 'defconfig'
-      DEVICE_NAME:
-        description: 'Device codename (used for zip naming)'
-        required: true
-        default: 'X6815C'
-      ARCH:
-        description: 'Target architecture'
-        required: true
-        default: 'arm64'
-      ANYKERNEL_REPO:
-        description: 'AnyKernel3 repo URL'
-        required: true
-        default: 'https://github.com/osm0sis/AnyKernel3'
-      ANYKERNEL_BRANCH:
-        description: 'AnyKernel3 branch'
-        required: true
-        default: 'master'
-
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout workflow repo (for local patches folder, if any)
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 5120
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex \
-            git gnupg gperf imagemagick \
-            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
-            liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
-            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python-is-python3 llvm lld clang \
-            libc6-dev-i386 device-tree-compiler
-
-      - name: Clone Google ACK 4.19 kernel source
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool
+      - name: Clone Verified MT6893 Kernel Source
         run: |
-          git clone --depth=1 -b "${{ github.event.inputs.KERNEL_BRANCH }}" \
-            "${{ github.event.inputs.KERNEL_REPO }}" kernel_source
-
-      - name: List available defconfigs (IMPORTANT - confirm correct DEFCONFIG name before real run)
+          # Xiaomi MT6893 kernel source
+          git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
+      - name: Download Stable Proton Clang Compiler
         run: |
-          find kernel_source -path "*/configs/*defconfig*" | head -n 60
-
-      - name: Clone AnyKernel3
+          # Android 4.19 architecture optimized compiler
+          # NOTE: verify this is the toolchain you actually want to use; swap the URL if you have a different one
+          git clone https://github.com/kdrag0n/proton-clang --depth=1 toolchain
+      - name: List Available Defconfigs (diagnostic)
         run: |
-          git clone --depth=1 -b "${{ github.event.inputs.ANYKERNEL_BRANCH }}" \
-            "${{ github.event.inputs.ANYKERNEL_REPO }}" AnyKernel3
-
-      - name: Apply local patches (optional, from patches/ folder in this repo)
+          cd source
+          echo "=== Available defconfigs in this source tree ==="
+          ls -la arch/arm64/configs/
+      - name: Auto-Inject eBPF & Port ROM Patches to Defconfig
         run: |
-          if [ -d "patches" ] && [ -n "$(ls -A patches/*.patch 2>/dev/null)" ]; then
-            cd kernel_source
-            for p in ../patches/*.patch; do
-              echo "Applying $p"
-              git apply --whitespace=fix "$p" || patch -p1 < "$p"
-            done
+          cd source
+          # NOTE: "pissarro_defconfig" was the Infinix codename — this almost
+          # certainly does NOT exist in the Xiaomi tree. Check the "List Available
+          # Defconfigs" step output above, then update TARGET_CONFIG to the real name.
+          TARGET_CONFIG="arch/arm64/configs/pissarro_defconfig"
+
+          if [ -f "$TARGET_CONFIG" ]; then
+            echo "" >> $TARGET_CONFIG
+            echo "# --- eBPF / KernelSU Compulsory Patches ---" >> $TARGET_CONFIG
+            echo "CONFIG_BPF=y" >> $TARGET_CONFIG
+            echo "CONFIG_BPF_SYSCALL=y" >> $TARGET_CONFIG
+            echo "CONFIG_BPF_JIT=y" >> $TARGET_CONFIG
+            echo "CONFIG_BPF_JIT_ALWAYS_ON=y" >> $TARGET_CONFIG
+            echo "CONFIG_HAVE_EBPF_JIT=y" >> $TARGET_CONFIG
+            echo "CONFIG_NET_CLS_ACT=y" >> $TARGET_CONFIG
+            echo "CONFIG_NET_CLS_BPF=y" >> $TARGET_CONFIG
+            echo "CONFIG_NET_ACT_BPF=y" >> $TARGET_CONFIG
+            echo "CONFIG_CGROUP_BPF=y" >> $TARGET_CONFIG
+            echo "CONFIG_IKCONFIG=y" >> $TARGET_CONFIG
+            echo "CONFIG_IKCONFIG_PROC=y" >> $TARGET_CONFIG
+
+            echo "# --- Port ROMs & Permissive Fail-Safe Patches ---" >> $TARGET_CONFIG
+            echo "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=0" >> $TARGET_CONFIG
+            echo "CONFIG_DM_DEFAULT_KEY=n" >> $TARGET_CONFIG
+            echo "CONFIG_NAMESPACES=y" >> $TARGET_CONFIG
+            echo "CONFIG_USER_NS=y" >> $TARGET_CONFIG
+            echo "CONFIG_PID_NS=y" >> $TARGET_CONFIG
+            echo "CONFIG_NET_NS=y" >> $TARGET_CONFIG
+            echo "# CONFIG_DM_VERITY_FEC is not set" >> $TARGET_CONFIG
+            echo "Successfully injected patches into pissarro_defconfig."
           else
-            echo "No patches/*.patch found, skipping."
-          fi
-
-      - name: Verify / force-enable BPF configs (needed for ColorOS-ported ROM netd/network on Android 10+)
-        run: |
-          cd kernel_source
-          CFG=$(find . -path "*/configs/${{ github.event.inputs.DEFCONFIG }}" | head -n1)
-          if [ -z "$CFG" ]; then
-            echo "ERROR: defconfig '${{ github.event.inputs.DEFCONFIG }}' not found in this branch."
-            echo "Check the 'List available defconfigs' step output above and re-run with a valid name."
+            echo "ERROR: Base config file not found! Check TARGET_CONFIG path above."
             exit 1
           fi
-          echo "Using defconfig: $CFG"
-          scripts/config --file "$CFG" \
-            -e BPF \
-            -e BPF_SYSCALL \
-            -e BPF_JIT \
-            -e HAVE_EBPF_JIT \
-            -e CGROUP_BPF \
-            -e BPF_EVENTS \
-            -e NETFILTER_XT_MATCH_BPF \
-            -e NET_CLS_BPF \
-            -e NET_ACT_BPF \
-            -e IKCONFIG \
-            -e IKCONFIG_PROC || true
-          grep -E "CONFIG_BPF|CONFIG_CGROUP_BPF" "$CFG"
-
-      - name: Set up Clang toolchain (AOSP prebuilt, LLVM full toolchain - no external binutils needed)
+      - name: Compile Custom Kernel Image
         run: |
-          mkdir -p toolchains
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchains/clang
-          CLANG_BIN=$(find toolchains/clang -maxdepth 1 -type d -name "clang-r*" | head -n1)
-          echo "CLANG_BIN=$GITHUB_WORKSPACE/$CLANG_BIN/bin" >> $GITHUB_ENV
+          cd source
+          # Compiler binaries path settings
+          export PATH="$(pwd)/../toolchain/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
 
-      - name: Build kernel
+          # Making configurations and building kernel binary
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc)
+      - name: Check and Package Output Artifact
         run: |
-          cd kernel_source
-          export ARCH=${{ github.event.inputs.ARCH }}
-          export SUBARCH=${{ github.event.inputs.ARCH }}
-          export KBUILD_BUILD_USER="ci"
-          export KBUILD_BUILD_HOST="github-actions"
-          export PATH="$CLANG_BIN:$PATH"
-          export LLVM=1
-          export LLVM_IAS=1
-          MAKE_ARGS="CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
-
-          make O=out $MAKE_ARGS ${{ github.event.inputs.DEFCONFIG }}
-          make O=out $MAKE_ARGS -j$(nproc --all)
-
-      - name: Package into AnyKernel3 zip
-        run: |
-          IMG=$(find kernel_source/out/arch/${{ github.event.inputs.ARCH }}/boot -maxdepth 1 -name "Image*" | head -n1)
-          cp "$IMG" AnyKernel3/Image.gz-dtb 2>/dev/null || cp "$IMG" AnyKernel3/Image
-          cd AnyKernel3
-          ZIP_NAME="ACK419-Kernel-${{ github.event.inputs.DEVICE_NAME }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "../$ZIP_NAME" . -x ".git*" "README.md"
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-
-      - name: Upload build artifact
+          cd source/out/arch/arm64/boot/
+          if [ -f "Image.gz" ]; then
+            echo "Compilation successful! Ready to package."
+          else
+            echo "ERROR: Kernel binary compilation failed!"
+            exit 1
+          fi
+      - name: Upload Flashable Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
-          retention-days: 14
+          name: Infinix-Zero-5G-2023-Kernel-Image
+          path: source/out/arch/arm64/boot/Image.gz
