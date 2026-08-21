@@ -127,13 +127,20 @@ jobs:
             echo "# CONFIG_DM_VERITY_FEC is not set" >> $TARGET_CONFIG
 
             echo "# --- Disable APUSYS (AI processing unit) driver ---" >> $TARGET_CONFIG
-            echo "# This subsystem's tracepoint headers (mnoc_met_events.h) hit a" >> $TARGET_CONFIG
-            echo "# real 'undeclared identifier' compile error unrelated to compiler" >> $TARGET_CONFIG
-            echo "# choice, and we don't need NPU/AI-accelerator support for a" >> $TARGET_CONFIG
-            echo "# working phone kernel, so we disable it outright." >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APUSYS_SUPPORT is not set" >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APUSYS is not set" >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APU_SUPPORT is not set" >> $TARGET_CONFIG
+
+            echo "# --- Disable CONFIG_BPF_EVENTS (root cause of MET header errors) ---" >> $TARGET_CONFIG
+            echo "# define_trace.h includes trace/bpf_probe.h whenever" >> $TARGET_CONFIG
+            echo "# CONFIG_BPF_EVENTS is set, and MediaTek's legacy MET tracepoint" >> $TARGET_CONFIG
+            echo "# headers (met_events_camsys.h, mnoc_met_events.h, and others" >> $TARGET_CONFIG
+            echo "# scattered across camera/display/GPU/connectivity drivers) break" >> $TARGET_CONFIG
+            echo "# under that re-inclusion mechanism with 'undeclared identifier'" >> $TARGET_CONFIG
+            echo "# errors. Disabling BPF_EVENTS stops this whole error class at" >> $TARGET_CONFIG
+            echo "# the source, without touching CONFIG_BPF/BPF_SYSCALL/BPF_JIT" >> $TARGET_CONFIG
+            echo "# (which is what KernelSU-Next/SUSFS actually needs)." >> $TARGET_CONFIG
+            echo "# CONFIG_BPF_EVENTS is not set" >> $TARGET_CONFIG
 
             echo "Successfully injected patches into pissarro_defconfig."
           else
