@@ -117,6 +117,15 @@ jobs:
             echo "CONFIG_IKCONFIG=y" >> $TARGET_CONFIG
             echo "CONFIG_IKCONFIG_PROC=y" >> $TARGET_CONFIG
 
+            echo "# --- Fix: net/core/rtnetlink.c MTK rtnl_lock-btrace debug code ---" >> $TARGET_CONFIG
+            echo "# Its '#ifdef CONFIG_MTK_NET_LOGGING' guard is commented out in this" >> $TARGET_CONFIG
+            echo "# tree, so the code is always compiled. It declares a local" >> $TARGET_CONFIG
+            echo "# 'struct stack_trace', whose full definition in linux/stacktrace.h" >> $TARGET_CONFIG
+            echo "# is only emitted when CONFIG_STACKTRACE is set. Without it, only" >> $TARGET_CONFIG
+            echo "# the incomplete forward declaration in stackdepot.h is visible," >> $TARGET_CONFIG
+            echo "# which fails to compile ('variable has incomplete type')." >> $TARGET_CONFIG
+            echo "CONFIG_STACKTRACE=y" >> $TARGET_CONFIG
+
             echo "# --- Port ROMs & Permissive Fail-Safe Patches ---" >> $TARGET_CONFIG
             echo "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=0" >> $TARGET_CONFIG
             echo "CONFIG_DM_DEFAULT_KEY=n" >> $TARGET_CONFIG
@@ -177,6 +186,26 @@ jobs:
                 ' * this keeps the rest of the thermal driver compiling. */' \
                 '#endif' > "$TARGET_DIR/vpu_dvfs.h"
             fi
+          fi
+
+      - name: Fix Missing slab.h Include in eas_ctrl.c
+        run: |
+          cd source
+          TARGET_FILE="drivers/misc/mediatek/performance/boost_ctrl/eas_ctrl/eas_ctrl.c"
+
+          if [ ! -f "$TARGET_FILE" ]; then
+            echo "ERROR: $TARGET_FILE not found! Source tree layout may have changed."
+            exit 1
+          fi
+
+          if grep -q "linux/slab.h" "$TARGET_FILE"; then
+            echo "slab.h already included, nothing to do."
+          else
+            echo "eas_ctrl.c calls kcalloc() but never includes <linux/slab.h>,"
+            echo "so clang implicitly assumes it returns int and errors out when"
+            echo "that int is assigned to an int* (int-to-pointer conversion)."
+            echo "Adding the missing include."
+            sed -i '/#include <linux\/uaccess.h>/a #include <linux/slab.h>' "$TARGET_FILE"
           fi
 
       - name: Compile Custom Kernel Image
