@@ -131,14 +131,20 @@ jobs:
             echo "# CONFIG_MTK_APUSYS is not set" >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APU_SUPPORT is not set" >> $TARGET_CONFIG
 
-            echo "# --- Note on CONFIG_BPF_EVENTS ---" >> $TARGET_CONFIG
-            echo "# BPF_EVENTS has no user prompt in Kconfig (bool, default y," >> $TARGET_CONFIG
-            echo "# depends on BPF_SYSCALL && (KPROBE_EVENTS||UPROBE_EVENTS) &&" >> $TARGET_CONFIG
-            echo "# PERF_EVENTS), so a defconfig 'is not set' line here is silently" >> $TARGET_CONFIG
-            echo "# ignored by the config tool. The actual fix for the MET" >> $TARGET_CONFIG
-            echo "# tracepoint build errors this causes is applied as a source" >> $TARGET_CONFIG
-            echo "# patch in the 'Patch MET Trace Headers' step below, so we do" >> $TARGET_CONFIG
-            echo "# NOT touch BPF_SYSCALL/KPROBE_EVENTS/UPROBE_EVENTS here." >> $TARGET_CONFIG
+            echo "# --- Disable CONFIG_BPF_EVENTS (root cause of MET header errors) ---" >> $TARGET_CONFIG
+            echo "# define_trace.h includes trace/bpf_probe.h whenever" >> $TARGET_CONFIG
+            echo "# CONFIG_BPF_EVENTS is set, and MediaTek's legacy MET tracepoint" >> $TARGET_CONFIG
+            echo "# headers (met_events_camsys.h, mnoc_met_events.h, and others" >> $TARGET_CONFIG
+            echo "# scattered across camera/display/GPU/connectivity drivers) break" >> $TARGET_CONFIG
+            echo "# under that re-inclusion mechanism with 'undeclared identifier'" >> $TARGET_CONFIG
+            echo "# errors. BPF_EVENTS has NO direct user prompt in Kconfig — it is" >> $TARGET_CONFIG
+            echo "# auto-derived from (KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS," >> $TARGET_CONFIG
+            echo "# so writing '# CONFIG_BPF_EVENTS is not set' directly is silently" >> $TARGET_CONFIG
+            echo "# ignored by kconfig. We disable its two real dependencies instead," >> $TARGET_CONFIG
+            echo "# which forces BPF_EVENTS off as a side effect, without touching" >> $TARGET_CONFIG
+            echo "# CONFIG_BPF/BPF_SYSCALL/BPF_JIT (what KernelSU-Next/SUSFS needs)." >> $TARGET_CONFIG
+            echo "# CONFIG_KPROBE_EVENTS is not set" >> $TARGET_CONFIG
+            echo "# CONFIG_UPROBE_EVENTS is not set" >> $TARGET_CONFIG
 
             echo "Successfully injected patches into pissarro_defconfig."
           else
@@ -146,83 +152,30 @@ jobs:
             exit 1
           fi
 
-      - name: Patch MET Trace Headers (fix BPF_EVENTS TRACE_EVENT overflow bug)
+      - name: Fix Missing vpu_dvfs.h Header
         run: |
           cd source
-          # Root cause: MediaTek's legacy MET tracepoint headers (e.g.
-          # met_events_camsys.h) define TRACE_EVENT() macros with more
-          # fields than include/trace/bpf_probe.h's argument-counting/
-          # casting machinery supports. When CONFIG_BPF_EVENTS is enabled
-          # (pulled in transitively via BPF_SYSCALL+KPROBE_EVENTS/
-          # UPROBE_EVENTS+PERF_EVENTS, all of which we DO want), these
-          # headers fail to compile with "use of undeclared identifier"
-          # errors deep inside macro expansion (e.g. camera_isp.c).
-          #
-          # BPF_EVENTS has no Kconfig prompt, so it cannot be disabled via
-          # a defconfig entry — the tool ignores such lines for invisible
-          # symbols and just recomputes the default. Instead, we neutralize
-          # it locally, per-header, with #undef CONFIG_BPF_EVENTS at the
-          # very top of each MET tracepoint header. Trace-event headers are
-          # deliberately re-included multiple times per translation unit
-          # (that's how the TRACE_EVENT macro system works), so the #undef
-          # re-applies on every pass and reliably prevents bpf_probe.h from
-          # being pulled in for just these headers — without touching
-          # CONFIG_BPF_SYSCALL/BPF_JIT/CGROUP_BPF anywhere else in the tree,
-          # which is what KernelSU-Next/SUSFS actually need.
-          echo "=== Searching for MET tracepoint headers ==="
-          MET_HEADERS=$(grep -rl --include="met_events*.h" "TRACE_EVENT" drivers/ 2>/dev/null || true)
+          TARGET_DIR="drivers/misc/mediatek/thermal/common"
 
-          if [ -z "$MET_HEADERS" ]; then
-            echo "No met_events*.h headers found (nothing to patch, tree may differ)."
+          if [ -f "$TARGET_DIR/vpu_dvfs.h" ]; then
+            echo "vpu_dvfs.h already present, nothing to do."
           else
-            for f in $MET_HEADERS; do
-              if head -n1 "$f" | grep -q "CONFIG_BPF_EVENTS"; then
-                echo "Already patched: $f"
-              else
-                sed -i '1i #undef CONFIG_BPF_EVENTS' "$f"
-                echo "Patched: $f"
-              fi
-            done
-          fi
-
-      - name: Patch missing vpu_dvfs.h (eara_thermal depends on disabled APUSYS)
-        run: |
-          cd source
-          # Root cause: vpu_dvfs.h only ever shipped as part of the APUSYS
-          # (AI processing unit) driver package. This defconfig deliberately
-          # disables APUSYS (# CONFIG_MTK_APUSYS_SUPPORT is not set, injected
-          # earlier in this workflow), which also means the Kbuild include
-          # path that normally exposes vpu_dvfs.h (-I<apusys>/include) is
-          # never added. drivers/misc/mediatek/performance/eara_thermal/src/
-          # thermal_budget.c includes it unconditionally regardless of that
-          # config, so it fails with "file not found" as soon as APUSYS is
-          # off. eara_thermal is a thermal-throttling helper for AI/VPU
-          # workloads — irrelevant once APUSYS itself isn't built.
-          echo "=== Searching for vpu_dvfs.h anywhere in tree ==="
-          FOUND=$(find . -name "vpu_dvfs.h" 2>/dev/null | head -n1 || true)
-
-          if [ -n "$FOUND" ]; then
-            echo "Found vpu_dvfs.h at: $FOUND — adding its directory to eara_thermal's include path."
-            HDR_DIR=$(dirname "$FOUND")
-            MAKEFILE="drivers/misc/mediatek/performance/eara_thermal/src/Makefile"
-            if [ -f "$MAKEFILE" ]; then
-              echo "ccflags-y += -I\$(srctree)/$HDR_DIR" >> "$MAKEFILE"
-              echo "Patched $MAKEFILE with include path."
+            echo "vpu_dvfs.h missing — searching rest of the tree for a copy..."
+            FOUND=$(find . -name "vpu_dvfs.h" 2>/dev/null | head -n 1)
+            if [ -n "$FOUND" ]; then
+              echo "Found existing copy at $FOUND — copying into $TARGET_DIR"
+              cp "$FOUND" "$TARGET_DIR/vpu_dvfs.h"
             else
-              echo "WARNING: expected Makefile not found at $MAKEFILE, could not patch include path."
-            fi
-          else
-            echo "vpu_dvfs.h not found anywhere in the tree (expected, since APUSYS"
-            echo "is disabled). Excluding eara_thermal from the build instead."
-            PATCHED=0
-            for f in $(grep -rl "eara_thermal" drivers/misc/mediatek/performance/Makefile* 2>/dev/null); do
-              sed -i '/eara_thermal/ s/^/#/' "$f"
-              echo "Commented out eara_thermal reference in $f"
-              PATCHED=1
-            done
-            if [ "$PATCHED" -eq 0 ]; then
-              echo "WARNING: could not find an 'eara_thermal' reference to comment out."
-              echo "The build may still fail on this file — check the tree structure."
+              echo "No copy found anywhere in the tree — this header was stripped from"
+              echo "this public source dump (same situation as the APUSYS driver)."
+              echo "Creating an empty stub so the #include doesn't fatally fail the build."
+              printf '%s\n' \
+                '#ifndef __VPU_DVFS_H__' \
+                '#define __VPU_DVFS_H__' \
+                '/* Stub header: original vpu_dvfs.h was not present in this source tree.' \
+                ' * VPU/NPU-specific thermal throttling is not available as a result, but' \
+                ' * this keeps the rest of the thermal driver compiling. */' \
+                '#endif' > "$TARGET_DIR/vpu_dvfs.h"
             fi
           fi
 
@@ -241,13 +194,11 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Relax implicit-function-declaration and unused-function from hard
-          # errors (-Werror) back to warnings — some legacy vendor driver
-          # files (e.g. the bundled Goodix touchscreen driver, and the
-          # resym performance-monitoring module) are missing an include or
-          # have intentionally-unused static helpers that clang treats more
-          # strictly as errors than GCC did originally.
-          export KCFLAGS="-Wno-error=implicit-function-declaration -Wno-error=unused-function"
+          # Relax implicit-function-declaration from a hard error (-Werror)
+          # back to a warning — some legacy vendor driver files (e.g. the
+          # bundled Goodix touchscreen driver) are missing an include that
+          # clang treats more strictly than GCC did originally.
+          export KCFLAGS="-Wno-error=implicit-function-declaration"
 
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
           # Build only Image.gz — we reuse the ORIGINAL device's dtb/dtbo
