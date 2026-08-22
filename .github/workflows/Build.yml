@@ -220,22 +220,6 @@ jobs:
             sed -i '/#include <linux\/uaccess.h>/a #include <linux/slab.h>' "$TARGET_FILE"
           fi
 
-      - name: Neutralize Every -Werror in the Tree (belt and suspenders)
-        run: |
-          cd source
-          # Some MediaTek vendor Makefiles hardcode "-Werror" or
-          # "subdir-ccflags-y += -Werror" directly in their own Makefile,
-          # which no top-level KCFLAGS override can undo (an explicit
-          # -Werror later on the command line always wins over an earlier
-          # -Wno-error). Strip those out at the source so nothing anywhere
-          # in this tree can turn a warning into a hard build failure.
-          echo "Scanning for hardcoded -Werror in Makefiles..."
-          grep -rl -- '-Werror' --include=Makefile --include=Kbuild . 2>/dev/null | while read -r f; do
-            echo "  stripping -Werror from: $f"
-            sed -i 's/-Werror\S*//g' "$f"
-          done
-          echo "Done."
-
       - name: Compile Custom Kernel Image
         run: |
           cd source
