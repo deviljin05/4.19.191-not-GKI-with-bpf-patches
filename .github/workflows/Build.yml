@@ -140,6 +140,18 @@ jobs:
             echo "# CONFIG_MTK_APUSYS is not set" >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APU_SUPPORT is not set" >> $TARGET_CONFIG
 
+            echo "# --- Disable VPU/MDLA thermal-budget support ---" >> $TARGET_CONFIG
+            echo "# drivers/misc/mediatek/vpu/ and drivers/misc/mediatek/mdla/ are" >> $TARGET_CONFIG
+            echo "# entirely absent from this source dump (same situation as APUSYS" >> $TARGET_CONFIG
+            echo "# above). With APUSYS off, performance/eara_thermal/src/thermal_budget.c" >> $TARGET_CONFIG
+            echo "# falls into its CONFIG_MTK_VPU_SUPPORT/CONFIG_MTK_MDLA_SUPPORT branches," >> $TARGET_CONFIG
+            echo "# which #include vpu_dvfs.h / mdla_dvfs.h from those missing directories" >> $TARGET_CONFIG
+            echo "# and reference real struct/array symbols from them (vpu_power_table," >> $TARGET_CONFIG
+            echo "# VPU_OPP_NUM, ...) that cannot be safely stubbed. Turning both configs" >> $TARGET_CONFIG
+            echo "# off skips those #include lines entirely, same fix strategy as APUSYS." >> $TARGET_CONFIG
+            echo "# CONFIG_MTK_VPU_SUPPORT is not set" >> $TARGET_CONFIG
+            echo "# CONFIG_MTK_MDLA_SUPPORT is not set" >> $TARGET_CONFIG
+
             echo "# --- Disable CONFIG_BPF_EVENTS (root cause of MET header errors) ---" >> $TARGET_CONFIG
             echo "# define_trace.h includes trace/bpf_probe.h whenever" >> $TARGET_CONFIG
             echo "# CONFIG_BPF_EVENTS is set, and MediaTek's legacy MET tracepoint" >> $TARGET_CONFIG
