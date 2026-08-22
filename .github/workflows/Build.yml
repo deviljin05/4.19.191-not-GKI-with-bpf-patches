@@ -295,7 +295,21 @@ jobs:
           else
             echo "goodix_ts_gesture.c calls ktime_get_boot_ns() but never includes"
             echo "<linux/timekeeping.h>, where that function is declared. Adding it."
-            sed -i '1i #include <linux/timekeeping.h>' "$TARGET_FILE"
+            # IMPORTANT: insert AFTER the last existing #include line, not at
+            # the very top of the file. timekeeping.h itself uses types like
+            # u32/u64/ktime_t/time64_t that are only typedef'd by other
+            # headers (linux/types.h, linux/ktime.h, etc.) — if timekeeping.h
+            # is inserted as line 1, it gets parsed before any of those
+            # prerequisite headers, causing "unknown type name" errors for
+            # every type it references. Inserting after the file's existing
+            # last #include guarantees everything it depends on is already
+            # visible, exactly like every other header already in the file.
+            LAST_INCLUDE_LINE=$(grep -n '^#include' "$TARGET_FILE" | tail -1 | cut -d: -f1)
+            if [ -z "$LAST_INCLUDE_LINE" ]; then
+              echo "ERROR: no #include lines found in $TARGET_FILE — can't safely place the new include."
+              exit 1
+            fi
+            sed -i "${LAST_INCLUDE_LINE}a #include <linux/timekeeping.h>" "$TARGET_FILE"
           fi
 
       - name: Compile Custom Kernel Image
