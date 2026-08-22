@@ -314,21 +314,32 @@ jobs:
           export SUBARCH=arm64
 
           # Blanket-disable -Werror so NO warning (unused function/variable,
-          # implicit-function-declaration, dangling-else, excess-initializers,
-          # anything) can ever turn into a hard build failure again.
-          # -Wno-error alone (without a specific =warning-name) turns off
-          # promotion-to-error treewide for every warning category clang
-          # knows about, while still letting the warnings print normally
-          # to the log (harmless, purely informational).
-          export KCFLAGS="-Wno-error"
-          export KCPPFLAGS="-Wno-error"
+          # dangling-else, excess-initializers, etc.) can ever turn into a
+          # hard build failure again.
+          #
+          # implicit-function-declaration needs a SEPARATE, stronger fix:
+          # starting with Clang 16, LLVM made implicit function declarations
+          # a hard error by default, as a C99-conformance rule enforced
+          # directly by the compiler — not merely a warning promoted via
+          # -Werror. That means -Wno-error (however it's spelled, however
+          # many Makefiles it's injected into) cannot touch it: -Wno-error
+          # only downgrades warnings that were promoted to errors, and this
+          # one is already a hardcoded error class in clang itself. The only
+          # thing that works is turning the check off outright with
+          # -Wno-implicit-function-declaration (and -Wno-implicit-int for
+          # the sibling "implicit int return type" rule some of these same
+          # legacy MTK files also trip), which this old 4.19 tree relies on
+          # throughout via missing prototypes/headers it never needed with
+          # the GCC toolchain it was originally written for.
+          export KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-implicit-int"
+          export KCPPFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-implicit-int"
 
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
           # Build only Image.gz — we reuse the ORIGINAL device's dtb/dtbo
           # straight from boot_original.img during the repack step later, so
           # we don't need a freshly built dtbo.img (which also fails here
           # since it calls "python2", not installed on modern Ubuntu).
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz KCFLAGS="-Wno-error" KCPPFLAGS="-Wno-error"
+          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-implicit-int" KCPPFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-implicit-int"
 
       - name: Check Kernel Compilation Output
         run: |
