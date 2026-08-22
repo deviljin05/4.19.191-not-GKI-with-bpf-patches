@@ -167,6 +167,24 @@ jobs:
             echo "# CONFIG_KPROBE_EVENTS is not set" >> $TARGET_CONFIG
             echo "# CONFIG_UPROBE_EVENTS is not set" >> $TARGET_CONFIG
 
+            echo "# --- Fix: implicit declaration of __trace_printk_check_format," >> $TARGET_CONFIG
+            echo "# __trace_bprintk, __trace_printk in dozens of MediaTek files ---" >> $TARGET_CONFIG
+            echo "# These MTK files (mtk_drm_crtc.c, mtk_dsi.c, mtk_fence.c, mdp_common.c," >> $TARGET_CONFIG
+            echo "# osal.c, thermal_base.c, rs_trace.c, and more) call their own" >> $TARGET_CONFIG
+            echo "# event_trace_printk()/mtk_drm_trace_*() macros unconditionally, without" >> $TARGET_CONFIG
+            echo "# checking whether tracing is enabled. Those macros expand to the real" >> $TARGET_CONFIG
+            echo "# ftrace internals __trace_printk / __trace_bprintk /" >> $TARGET_CONFIG
+            echo "# __trace_printk_check_format, which include/linux/kernel.h only" >> $TARGET_CONFIG
+            echo "# declares when CONFIG_TRACING is enabled. Turning tracing on makes" >> $TARGET_CONFIG
+            echo "# these real (not stub) declarations visible everywhere, fixing the" >> $TARGET_CONFIG
+            echo "# root cause instead of just suppressing the resulting warning/error." >> $TARGET_CONFIG
+            echo "CONFIG_FTRACE=y" >> $TARGET_CONFIG
+            echo "CONFIG_TRACING=y" >> $TARGET_CONFIG
+            echo "CONFIG_TRACING_SUPPORT=y" >> $TARGET_CONFIG
+            echo "CONFIG_TRACE_PRINTK=y" >> $TARGET_CONFIG
+            echo "CONFIG_RING_BUFFER=y" >> $TARGET_CONFIG
+            echo "CONFIG_TRACEPOINTS=y" >> $TARGET_CONFIG
+
             echo "Successfully injected patches into pissarro_defconfig."
           else
             echo "ERROR: Base config file not found! Check the diagnostic step output above."
