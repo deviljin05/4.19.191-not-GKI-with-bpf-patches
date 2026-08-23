@@ -1,27 +1,6 @@
-name: Build Infinix Zero 5G 2023 Custom Kernel
+name: Build Infinix Zero 5G 2023 Custom Kernel (AnyKernel3, BPF patches)
 on:
-  workflow_dispatch:
-    inputs:
-      boot_img_url:
-        description: 'Direct link or Google Drive share link to your original boot.img'
-        required: false
-        default: 'https://drive.google.com/file/d/1p8teKTyefbW5VNIpMSZdXMqvVNfQ8fUI/view?usp=drive_link'
-
-# ============================================================================
-# HOW TO PROVIDE YOUR ORIGINAL BOOT IMAGE (pick ONE):
-#
-# Option A (recommended for big files): upload boot.img as a GitHub Release
-# asset (Releases support up to 2GB, no Git LFS needed), copy its direct
-# download link, and paste that link into the "boot_img_url" input when you
-# run this workflow (Actions tab -> Run workflow).
-#
-# Option B: commit the file to the repo root yourself as boot_original.img
-# and leave boot_img_url blank.
-#
-# Either way, this workflow unpacks it to pull out the original ramdisk,
-# DTB, and header arguments (cmdline, base address, page size, offsets,
-# etc.) so the final repacked boot.img matches what your device expects.
-# ============================================================================
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -55,35 +34,7 @@ jobs:
             git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
             device-tree-compiler python3 python3-pip cpio
 
-      - name: Get Original Boot Image
-        run: |
-          pip install --break-system-packages --quiet gdown
-
-          if [ -f "boot_original.img" ]; then
-            echo "Found boot_original.img already in repo ($(du -h boot_original.img | cut -f1))"
-          elif [ -n "${{ github.event.inputs.boot_img_url }}" ]; then
-            URL="${{ github.event.inputs.boot_img_url }}"
-            echo "Downloading boot_original.img from provided URL..."
-
-            if echo "$URL" | grep -q "drive.google.com"; then
-              FILE_ID=$(echo "$URL" | grep -oP '(?<=/d/)[^/]+' || echo "$URL" | grep -oP '(?<=id=)[^&]+')
-              echo "Detected Google Drive link, file ID: $FILE_ID"
-              gdown "https://drive.google.com/uc?id=$FILE_ID" -O boot_original.img
-            else
-              curl -L "$URL" -o boot_original.img
-            fi
-
-            if [ ! -s "boot_original.img" ]; then
-              echo "ERROR: download failed or produced an empty file."
-              exit 1
-            fi
-            echo "Downloaded boot_original.img ($(du -h boot_original.img | cut -f1))"
-          else
-            echo "ERROR: boot_original.img not found in repo, and no boot_img_url input was provided."
-            exit 1
-          fi
-
-      - name: Clone Verified MT6893 Kernel Source
+      - name: Clone Verified MT6893 Kernel Source (BPF-patched tree)
         run: |
           git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
 
@@ -97,14 +48,14 @@ jobs:
           echo "=== Available defconfigs in this source tree ==="
           ls -la arch/arm64/configs/
 
-      - name: Auto-Inject eBPF & Port ROM Patches to Defconfig
+      - name: Auto-Inject eBPF Patches to Defconfig
         run: |
           cd source
           TARGET_CONFIG="arch/arm64/configs/pissarro_defconfig"
 
           if [ -f "$TARGET_CONFIG" ]; then
             echo "" >> $TARGET_CONFIG
-            echo "# --- eBPF / KernelSU Compulsory Patches ---" >> $TARGET_CONFIG
+            echo "# --- eBPF Compulsory Patches ---" >> $TARGET_CONFIG
             echo "CONFIG_BPF=y" >> $TARGET_CONFIG
             echo "CONFIG_BPF_SYSCALL=y" >> $TARGET_CONFIG
             echo "CONFIG_BPF_JIT=y" >> $TARGET_CONFIG
@@ -125,15 +76,6 @@ jobs:
             echo "# the incomplete forward declaration in stackdepot.h is visible," >> $TARGET_CONFIG
             echo "# which fails to compile ('variable has incomplete type')." >> $TARGET_CONFIG
             echo "CONFIG_STACKTRACE=y" >> $TARGET_CONFIG
-
-            echo "# --- Port ROMs & Permissive Fail-Safe Patches ---" >> $TARGET_CONFIG
-            echo "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=0" >> $TARGET_CONFIG
-            echo "CONFIG_DM_DEFAULT_KEY=n" >> $TARGET_CONFIG
-            echo "CONFIG_NAMESPACES=y" >> $TARGET_CONFIG
-            echo "CONFIG_USER_NS=y" >> $TARGET_CONFIG
-            echo "CONFIG_PID_NS=y" >> $TARGET_CONFIG
-            echo "CONFIG_NET_NS=y" >> $TARGET_CONFIG
-            echo "# CONFIG_DM_VERITY_FEC is not set" >> $TARGET_CONFIG
 
             echo "# --- Disable APUSYS (AI processing unit) driver ---" >> $TARGET_CONFIG
             echo "# CONFIG_MTK_APUSYS_SUPPORT is not set" >> $TARGET_CONFIG
@@ -163,7 +105,7 @@ jobs:
             echo "# so writing '# CONFIG_BPF_EVENTS is not set' directly is silently" >> $TARGET_CONFIG
             echo "# ignored by kconfig. We disable its two real dependencies instead," >> $TARGET_CONFIG
             echo "# which forces BPF_EVENTS off as a side effect, without touching" >> $TARGET_CONFIG
-            echo "# CONFIG_BPF/BPF_SYSCALL/BPF_JIT (what KernelSU-Next/SUSFS needs)." >> $TARGET_CONFIG
+            echo "# CONFIG_BPF/BPF_SYSCALL/BPF_JIT (the actual eBPF support we want)." >> $TARGET_CONFIG
             echo "# CONFIG_KPROBE_EVENTS is not set" >> $TARGET_CONFIG
             echo "# CONFIG_UPROBE_EVENTS is not set" >> $TARGET_CONFIG
 
@@ -185,7 +127,7 @@ jobs:
             echo "CONFIG_RING_BUFFER=y" >> $TARGET_CONFIG
             echo "CONFIG_TRACEPOINTS=y" >> $TARGET_CONFIG
 
-            echo "Successfully injected patches into pissarro_defconfig."
+            echo "Successfully injected BPF patches into pissarro_defconfig."
           else
             echo "ERROR: Base config file not found! Check the diagnostic step output above."
             exit 1
@@ -241,22 +183,6 @@ jobs:
       - name: Neutralize Hardcoded -Werror=implicit-function-declaration
         run: |
           cd source
-          # This kernel's own top-level Makefile enforces
-          # -Werror=implicit-function-declaration unconditionally (this is a
-          # common upstream hardening flag, independent of our KCFLAGS). It
-          # gets appended to KBUILD_CFLAGS AFTER our KCFLAGS override, so no
-          # amount of -Wno-error in KCFLAGS can undo it — the later flag on
-          # the command line always wins. This is exactly why dozens of MTK
-          # files using event_trace_printk() (mtk_drm_crtc.c, mtk_dsi.c,
-          # mtk_fence.c, etc.) keep hard-failing instead of just warning.
-          #
-          # IMPORTANT: unlike an earlier attempt that blanket-stripped
-          # "-Werror\S*" across every Makefile in the tree (which corrupted
-          # a $(call cc-option, ...) elsewhere and broke the build with
-          # "unterminated call to function 'call'"), this only swaps the
-          # flag's TEXT for an equivalent non-fatal one, character-for-
-          # character, inside whatever wrapper macro already contains it.
-          # No parentheses, commas, or $(call ...) structure are touched.
           echo "Before:"
           grep -n -- '-Werror=implicit-function-declaration\|-Werror-implicit-function-declaration' Makefile || echo "  (not found directly in Makefile; may already be inherited via scripts/Kbuild.include or arch Makefile)"
 
@@ -265,8 +191,6 @@ jobs:
             -e 's/-Werror-implicit-function-declaration/-Wimplicit-function-declaration/g' \
             Makefile
 
-          # Also check the two other places this flag conventionally lives,
-          # using the exact same safe text-only substitution.
           for f in scripts/Kbuild.include arch/arm64/Makefile; do
             if [ -f "$f" ] && grep -q -- '-Werror.*implicit-function-declaration' "$f"; then
               echo "Also neutralizing in $f"
@@ -295,15 +219,6 @@ jobs:
           else
             echo "goodix_ts_gesture.c calls ktime_get_boot_ns() but never includes"
             echo "<linux/timekeeping.h>, where that function is declared. Adding it."
-            # IMPORTANT: insert AFTER the last existing #include line, not at
-            # the very top of the file. timekeeping.h itself uses types like
-            # u32/u64/ktime_t/time64_t that are only typedef'd by other
-            # headers (linux/types.h, linux/ktime.h, etc.) — if timekeeping.h
-            # is inserted as line 1, it gets parsed before any of those
-            # prerequisite headers, causing "unknown type name" errors for
-            # every type it references. Inserting after the file's existing
-            # last #include guarantees everything it depends on is already
-            # visible, exactly like every other header already in the file.
             LAST_INCLUDE_LINE=$(grep -n '^#include' "$TARGET_FILE" | tail -1 | cut -d: -f1)
             if [ -z "$LAST_INCLUDE_LINE" ]; then
               echo "ERROR: no #include lines found in $TARGET_FILE — can't safely place the new include."
@@ -322,10 +237,6 @@ jobs:
           elif grep -q "__maybe_unused rs_update_io_stat" "$TARGET_FILE"; then
             echo "Already patched, nothing to do."
           else
-            echo "rs_update_io_stat() is defined but never called, and this directory's"
-            echo "own Kbuild enforces -Werror on unused-function warnings (independent of"
-            echo "our global KCFLAGS). Marking it __maybe_unused fixes the warning at its"
-            echo "source instead of fighting -Werror flag ordering."
             sed -i \
               's/^static void rs_update_io_stat(/static void __maybe_unused rs_update_io_stat(/' \
               "$TARGET_FILE"
@@ -334,23 +245,6 @@ jobs:
       - name: Globally Defang Any Local -Werror Additions (safety net)
         run: |
           cd source
-          echo "Scanning every Makefile/Kbuild in the tree for a BARE -Werror flag"
-          echo "addition (as opposed to -Werror=<specific-check>, which is handled"
-          echo "separately above). A bare -Werror promotes ALL warnings in that"
-          echo "file/directory to hard errors — including ones like -Wunused-function"
-          echo "or -Wunused-variable that are otherwise harmless — and it is baked"
-          echo "into that subdirectory's own build rules, so our global"
-          echo "KCFLAGS=-Wno-error on the make command line does NOT override it."
-          echo ""
-          echo "This only touches a standalone '-Werror' token (word-bounded, no"
-          echo "'=' before or after it), so it deliberately leaves untouched:"
-          echo "  - '-Werror=some-specific-check' (already handled per-case above)"
-          echo "  - anything inside \$(call cc-option, ...) or similar macro"
-          echo "    structures, since those always have '=' or extra chars nearby"
-          echo "This avoids the earlier failure mode where a blanket '-Werror\\S*'"
-          echo "regex corrupted a \$(call ...) elsewhere and broke the build with"
-          echo "'unterminated call to function call'."
-
           FOUND_FILES=$(grep -rlP '(?<![=\w-])-Werror(?![=\w-])' \
             --include=Makefile --include=Kbuild . 2>/dev/null || true)
 
@@ -368,36 +262,10 @@ jobs:
       - name: Compile Custom Kernel Image
         run: |
           cd source
-          # toolchain goes AFTER the system PATH, not before: plain "gcc"/"ld"
-          # (used to build HOST tools like fixdep, which run on the runner
-          # itself) must resolve to the runner's own up-to-date binutils.
-          # proton-clang's bundled ld is older and chokes on the runner's
-          # newer glibc (.relr.dyn RELR sections) if picked up for host
-          # builds. The aarch64-linux-gnu-* cross tools are uniquely named
-          # (no system equivalent), so they still resolve correctly from
-          # toolchain/bin even at the end of PATH.
           export PATH="$PATH:$(pwd)/../toolchain/bin"
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Blanket-disable -Werror so NO warning can ever turn into a hard
-          # build failure again, PLUS explicitly silence every warning class
-          # actually observed across full build logs so far (unused
-          # functions/variables/labels, macro redefinitions, excess
-          # initializers, pointer/int casts, dangling-else, shift/logical
-          # operator parens, missing forward-decl visibility, non-void
-          # return paths, fortify-source snprintf size mismatches, and
-          # oversized array initializers). None of these affect what the
-          # kernel actually does at runtime — they are all either dead code,
-          # cosmetic, or pre-existing quirks in this vendor tree that its
-          # original (GCC, not Clang) toolchain never flagged.
-          #
-          # implicit-function-declaration and implicit-int need SEPARATE,
-          # stronger handling: starting with Clang 16, LLVM made both of
-          # these hard errors by default as C99-conformance rules enforced
-          # directly by the compiler — not warnings promoted via -Werror.
-          # -Wno-error cannot touch them for that reason; only the specific
-          # -Wno-implicit-function-declaration / -Wno-implicit-int flags do.
           export KCFLAGS="-Wno-error \
             -Wno-implicit-function-declaration -Wno-implicit-int \
             -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable \
@@ -413,10 +281,6 @@ jobs:
           export KCPPFLAGS="$KCFLAGS"
 
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
-          # Build only Image.gz — we reuse the ORIGINAL device's dtb/dtbo
-          # straight from boot_original.img during the repack step later, so
-          # we don't need a freshly built dtbo.img (which also fails here
-          # since it calls "python2", not installed on modern Ubuntu).
           make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
 
       - name: Check Kernel Compilation Output
@@ -429,19 +293,58 @@ jobs:
             exit 1
           fi
 
-      - name: Unpack Original Boot Image
+      - name: Clone AnyKernel3 Template (for tools/ and installer helpers only)
         run: |
-          git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg_tools
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
 
-          mkdir -p unpacked
-          python3 mkbootimg_tools/unpack_bootimg.py --boot_img boot_original.img --out unpacked --format mkbootimg | tee unpacked/repack_args.txt
+      - name: Write Our Own anykernel.sh (auto A/B and single-slot detection)
+        run: |
+          cd anykernel3
+          # We don't sed-edit the upstream anykernel.sh (its exact wording
+          # changes across AnyKernel3 releases, so pattern-matching it is
+          # fragile). Instead we write a fresh, minimal anykernel.sh that
+          # uses AnyKernel3's own tools/ak3-core.sh helper (cloned above) to
+          # do all the actual boot-image dump/patch/write work. block=auto
+          # and is_slot_device=auto make ak3-core.sh detect A/B vs single
+          # slot and the boot partition path by itself at flash time — no
+          # per-device configuration needed from us.
+          cat > anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## Infinix Zero 5G 2023 — BPF-patched kernel only, no ramdisk changes
 
-          echo "=== Unpacked contents ==="
-          ls -la unpacked/
-          echo "=== Captured repack arguments ==="
-          cat unpacked/repack_args.txt
+          ### AnyKernel setup
+          # global properties
+          properties() { '
+          kernel.string=Infinix Zero 5G 2023 BPF Kernel
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          block=auto
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          '; } # end properties
 
-      - name: Repack Boot Image with New Kernel
+          ### AnyKernel install
+          [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
+
+          ## boot install
+          dump_boot
+
+          # No ramdisk modifications — this build only replaces the kernel
+          # itself (BPF support compiled in), so nothing else runs here
+          # between dump_boot and write_boot.
+
+          write_boot
+          ## end boot install
+          EOF
+
+          echo "=== anykernel.sh written ==="
+          cat anykernel.sh
+
+      - name: Package Kernel into AnyKernel3 Zip
         run: |
           NEW_KERNEL="source/out/arch/arm64/boot/Image.gz"
 
@@ -450,28 +353,25 @@ jobs:
             exit 1
           fi
 
-          REPACK_CMD=$(cat unpacked/repack_args.txt | sed "s#--kernel [^ ]*#--kernel $NEW_KERNEL#")
+          cp "$NEW_KERNEL" anykernel3/Image.gz
 
-          echo "=== Final repack command ==="
-          echo "python3 mkbootimg_tools/mkbootimg.py $REPACK_CMD --output boot_new.img"
+          cd anykernel3
+          rm -rf .git README.md LICENSE .github 2>/dev/null || true
 
-          python3 mkbootimg_tools/mkbootimg.py $REPACK_CMD --output boot_new.img
+          ZIP_NAME="InfinixZero5G2023-BPF-Kernel-AnyKernel3.zip"
+          zip -r9 "../$ZIP_NAME" . -x ".git/*"
 
-          if [ -f "boot_new.img" ]; then
-            echo "boot_new.img created successfully ($(du -h boot_new.img | cut -f1))"
-          else
-            echo "ERROR: repack failed, boot_new.img not produced"
-            exit 1
-          fi
+          echo "=== AnyKernel3 zip created ==="
+          ls -la "../$ZIP_NAME"
 
-      - name: Upload Kernel Image Artifact
+      - name: Upload Raw Kernel Image Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Infinix-Zero-5G-2023-Kernel-Image
           path: source/out/arch/arm64/boot/Image.gz
 
-      - name: Upload Flashable Boot Image
+      - name: Upload AnyKernel3 Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero-5G-2023-boot-new
-          path: boot_new.img
+          name: Infinix-Zero-5G-2023-AnyKernel3
+          path: InfinixZero5G2023-BPF-Kernel-AnyKernel3.zip
