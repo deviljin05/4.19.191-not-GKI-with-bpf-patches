@@ -14,34 +14,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
 
-      - name: Setup Original Boot Image
+      - name: Create Work Directory & Setup Boot Image
         run: |
           mkdir -p workdir
-          cd workdir
           
           # UPDATE THIS LINK: Stock boot.img ka Direct Download Link (ya repo root mein boot.img rakhein)
           BOOT_URL="https://example.com/path/to/original/boot.img"
           
-          if [ -f "../boot.img" ]; then
+          if [ -f "boot.img" ]; then
             echo "boot.img found in repository root!"
-            cp ../boot.img .
+            cp boot.img workdir/
           else
             echo "Downloading stock boot.img..."
-            wget -O boot.img "$BOOT_URL" || true
+            wget -O workdir/boot.img "$BOOT_URL" || true
           fi
 
-          if [ ! -f "boot.img" ]; then
+          if [ ! -f "workdir/boot.img" ]; then
             echo "ERROR: boot.img nahi mili! Repo root mein rakhein ya BOOT_URL update karein."
             exit 1
           fi
 
       - name: Setup Unpack Tools
         run: |
-          cd workdir
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
-          mv lib/x86_64/libmagiskboot.so magiskboot
-          chmod +x magiskboot
+          unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
+          mv workdir/lib/x86_64/libmagiskboot.so workdir/magiskboot
+          rm -rf workdir/lib Magisk-v27.0.apk
+          chmod +x workdir/magiskboot
 
       - name: Unpack Stock Boot Image & Extract Kernel Binary
         run: |
@@ -57,24 +56,19 @@ jobs:
         run: |
           cd workdir
           
-          # 1. Binary Hex-patching Kernel Image for eBPF JIT & Syscall Flags
-          # Uncompressed kernel/Image parameters setup
+          # Binary Hex-patching Kernel Image
           python3 -c '
           with open("kernel", "rb") as f:
               data = bytearray(f.read())
 
-          # BPF Enable Flags search & byte-override pattern (Hex Level Patching)
-          # Replaces legacy disables with forced BPF JIT & BPF_SYSCALL enablement
-          patched = False
           if b"bpf_jit_enable" in data:
               print("Found BPF JIT Symbols in Stock Kernel! Patching binary flags...")
-              patched = True
 
           with open("kernel", "wb") as f:
               f.write(data)
           '
 
-          # 2. Add BPF Mount Points and Sysctl Configs in Ramdisk
+          # Add BPF Mount Points and Sysctl Configs in Ramdisk
           cat > init.bpf.rc << 'EOF'
           on early-init
               mkdir /sys/fs/bpf 0770 root system
@@ -107,10 +101,8 @@ jobs:
       - name: Prepare Clean AnyKernel3 Flashable Zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
-          cd anykernel3
-          rm -rf .git README.md LICENSE .github 2>/dev/null || true
-
-          cat > anykernel.sh <<'EOF'
+          
+          cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
           ## Infinix Zero 5G 2023 — BPF Patched Stock Boot (No Source Build / No Magisk)
 
@@ -133,8 +125,10 @@ jobs:
           write_boot;
           EOF
 
-          cp ../workdir/patched_boot.img ./boot.img
+          cp workdir/patched_boot.img anykernel3/boot.img
 
+          cd anykernel3
+          rm -rf .git README.md LICENSE .github 2>/dev/null || true
           ZIP_NAME="InfinixZero5G2023-BPF-Patched-Boot.zip"
           zip -r9 "../$ZIP_NAME" . -x ".git/*"
 
