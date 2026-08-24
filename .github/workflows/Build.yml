@@ -33,7 +33,12 @@ jobs:
       #      never finds it (it's not a system header).
       #   2. drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c has the exact
       #      same angled-vs-quoted bug for its own local header.
-      #   3. kernel/trace/mtk_trace.c #includes mtk_ftrace.h via the
+      #   3. drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-v6877.c has the same
+      #      angled-vs-quoted bug for helio-dvfsrc-v6877.h — confirmed from
+      #      build log ("file not found with <angled> include; use "quotes"
+      #      instead"), hit twice in the same build (once under drivers/,
+      #      once when make revisits the target after arch/arm64/lib).
+      #   4. kernel/trace/mtk_trace.c #includes mtk_ftrace.h via the
       #      TRACE_INCLUDE_PATH machinery, but mtk_ftrace.h doesn't exist
       #      anywhere in this tree — it's an orphaned vendor trace file, not
       #      something the BPF config path needs. Rather than fabricate a
@@ -56,6 +61,7 @@ jobs:
           BROKEN_LOCAL_HEADERS="
             dt_idle_states.h
             helio-dvfsrc-qos.h
+            helio-dvfsrc-v6877.h
             mtk_dvfsrc_reg_v2.h
             mtk_dvfsrc_smc_reg.h
             mtk-dsp-mem-control.h
