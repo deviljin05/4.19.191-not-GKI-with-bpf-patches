@@ -97,7 +97,20 @@ jobs:
           # olddefconfig throws up for newly-exposed config options (like the
           # COMPAT_VDSO / LTO / SHADOW_CALL_STACK prompts seen in earlier
           # build logs), instead of the build silently hanging/failing there.
+          #
+          # `yes` gets SIGPIPE the moment olddefconfig finishes reading stdin,
+          # which it reports as "Broken pipe" and a non-zero exit (141). With
+          # `set -o pipefail` that would fail this whole step even when
+          # olddefconfig itself succeeded — so pipefail is turned off just for
+          # this line and only olddefconfig's own exit status is checked.
+          set +o pipefail
           yes "" | make olddefconfig
+          OLDDEFCONFIG_STATUS=${PIPESTATUS[1]}
+          set -o pipefail
+          if [ "$OLDDEFCONFIG_STATUS" -ne 0 ]; then
+            echo "ERROR: make olddefconfig failed (exit $OLDDEFCONFIG_STATUS)"
+            exit 1
+          fi
 
           echo "=== Applied BPF/related config — confirm nothing silently dropped ==="
           grep -E "^CONFIG_(BPF|KPROBE|NET_CLS|NET_ACT|NETFILTER_XT_MATCH_BPF|PERF_EVENTS|CGROUP_SCHED|FAIR_GROUP_SCHED)" .config
