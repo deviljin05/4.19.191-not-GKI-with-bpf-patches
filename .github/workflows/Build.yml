@@ -1,4 +1,4 @@
-name: Build Clean MT6877 Kernel Source (No-Error BPF Build)
+name: Build Clean MT6877 Kernel Source (Proper GCC 10+ Compilation)
 on:
   workflow_dispatch: {}
 
@@ -19,27 +19,23 @@ jobs:
       - name: Clone Public MT6877 Kernel Source
         run: |
           echo "Cloning Verified Public MT6877 Kernel Source..."
-          
-          # Try cloning verified public MT6877 repos without prompt blocking
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b ruby-s-oss kernel_src || \
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/whoisgabutuniverseshit/device_infinix_X6815D-kernel kernel_src || \
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6877 kernel_src
 
-          if [ ! -d "kernel_src" ]; then
-            mkdir -p kernel_src
-            echo "Fallback directory created."
-          fi
-
-      - name: Download Compatible Android Clang Toolchain
+      - name: Download Modern Compiler Toolchains (GCC 10.3 + Clang 13)
         run: |
           mkdir -p toolchains
           cd toolchains
-          echo "Downloading Google AOSP Clang 12..."
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
-          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
           
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+          # Download Modern Clang 13+
+          echo "Downloading AOSP Clang 13..."
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz
+          mkdir clang && tar -xf clang-r450784d.tar.gz -C clang
+          
+          # Download GCC 10.3 / 9.3 for Modern Kernel Build
+          echo "Downloading GCC 10.3 Toolchains..."
+          git clone --depth=1 https://github.com/Starlight-524/aarch64-linux-gnu-10.3 gcc64
+          git clone --depth=1 https://github.com/Starlight-524/arm-linux-gnueabi-10.3 gcc32
 
       - name: Download Infinix Stock Base (MediaFire)
         run: |
@@ -90,22 +86,28 @@ jobs:
 
           make olddefconfig || true
 
-      - name: Compile Kernel Image
+      - name: Compile Kernel Image (Strict Build)
         run: |
           cd kernel_src
-          PATH="$(pwd)/../toolchains/clang/bin:$(pwd)/../toolchains/gcc64/bin:$(pwd)/../toolchains/gcc32/bin:${PATH}"
+          
+          # Set compiler PATH to GCC 10 + Clang
+          CLANG_DIR="$(pwd)/../toolchains/clang/bin"
+          GCC64_DIR="$(pwd)/../toolchains/gcc64/bin"
+          GCC32_DIR="$(pwd)/../toolchains/gcc32/bin"
+          
+          export PATH="${CLANG_DIR}:${GCC64_DIR}:${GCC32_DIR}:${PATH}"
           
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          # Compile Image
-          make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image || echo "Compilation finished or falling back to binary container."
+          echo "Starting C/C++ Kernel Source Compile..."
+          make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
 
-      - name: Setup Repack Tool & Container Assembly
+      - name: Verify & Repack Compiled Kernel
         run: |
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
@@ -113,11 +115,16 @@ jobs:
           rm -rf workdir/lib Magisk-v27.0.apk
           chmod +x workdir/magiskboot
 
-          # If new Image was compiled, replace it
+          # Confirm fresh kernel image exists
           if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
+            echo "SUCCESS: Fresh compiled Image.gz found!"
             cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
           elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
+            echo "SUCCESS: Fresh compiled Image found!"
             cp kernel_src/arch/arm64/boot/Image workdir/kernel
+          else
+            echo "ERROR: Compilation failed to generate Image!"
+            exit 1
           fi
 
       - name: Apply BPF Init Hooks into Ramdisk
@@ -149,10 +156,10 @@ jobs:
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## Clean MT6877 BPF Kernel
+          ## Properly Compiled MT6877 BPF Kernel
 
           properties() { '
-          kernel.string=Clean MT6877 BPF Kernel
+          kernel.string=Properly Compiled MT6877 BPF Kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -173,10 +180,10 @@ jobs:
           cp workdir/clean_bpf_boot.img anykernel3/boot.img
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../Clean-MT6877-BPF-Kernel.zip" . -x ".git/*"
+          zip -r9 "../Proper-Compiled-MT6877-BPF-Kernel.zip" . -x ".git/*"
 
       - name: Upload Flashable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Clean-MT6877-BPF-Kernel
-          path: Clean-MT6877-BPF-Kernel.zip
+          name: Proper-Compiled-MT6877-BPF-Kernel
+          path: Proper-Compiled-MT6877-BPF-Kernel.zip
