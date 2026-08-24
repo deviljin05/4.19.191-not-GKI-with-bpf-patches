@@ -26,19 +26,22 @@ jobs:
           echo "Kernel version:"
           grep -m3 -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" kernel_src/Makefile
 
-      # This tree pins clang-r383902 in build.config.mtk.aarch64 — a different,
-      # older clang than the r416183b used on the stock MiCode/ruby-s-oss tree.
-      # Full-LLVM build (LLVM=1, LLVM_IAS=1): no GCC cross-compiler is needed at
-      # all here, just clang + lld + llvm-binutils, per this repo's own config.
-      - name: Download AOSP Clang r383902 (pinned by this kernel's build.config)
+      # Two known source-level breakages in this tree that show up regardless
+      # of the BPF config additions below:
+      #   1. drivers/cpuidle/cpuidle-mediatek.c includes a local header with
+      #      <angled> brackets instead of "quotes", so clang's include search
+      #      never finds it (it's not a system header).
+      # Patched here, before config merge/build, so both failure points in the
+      # earlier logs (kernel/sched/extension/eas_plus.o and
+      # drivers/cpuidle/cpuidle-mediatek.o) are handled.
+      - name: Patch Known Source Issues
         run: |
           set -euo pipefail
-          mkdir -p toolchains/clang
-          cd toolchains/clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r28/clang-r383902.tar.gz
-          tar -xf clang-r383902.tar.gz
-          test -x bin/clang || { echo "ERROR: clang binary missing after extraction"; exit 1; }
-          test -x bin/ld.lld || { echo "ERROR: ld.lld missing after extraction"; exit 1; }
+          cd kernel_src
+          sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/' \
+            drivers/cpuidle/cpuidle-mediatek.c
+          echo "=== Confirm patch applied ==="
+          grep -n 'dt_idle_states.h' drivers/cpuidle/cpuidle-mediatek.c
 
       # ruby_defconfig (this tree's device fragment) has NO binder/ashmem/
       # netfilter/net_sched entries at all, same as the stock repo's fragment —
@@ -64,9 +67,17 @@ jobs:
           # and don't exist here — left out on purpose. CONFIG_PERF_EVENTS is
           # added explicitly since BPF_EVENTS depends on it and it isn't on
           # anywhere in the defconfig chain.
+          #
+          # CONFIG_CGROUP_SCHED / CONFIG_FAIR_GROUP_SCHED are added because
+          # kernel/sched/extension/eas_plus.c references
+          # sched_entity->my_q, which only exists when
+          # CONFIG_FAIR_GROUP_SCHED is enabled — without it the build fails
+          # with "no member named 'my_q' in 'struct sched_entity'".
           cat << 'EOF' >> .config
           CONFIG_BPF=y
           CONFIG_BPF_SYSCALL=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_FAIR_GROUP_SCHED=y
           CONFIG_BPF_JIT=y
           CONFIG_BPF_JIT_ALWAYS_ON=y
           CONFIG_HAVE_EBPF_JIT=y
@@ -82,10 +93,24 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_BPF=y
           EOF
 
-          make olddefconfig
+          # yes "" feeds a blank/default answer to any interactive prompt
+          # olddefconfig throws up for newly-exposed config options (like the
+          # COMPAT_VDSO / LTO / SHADOW_CALL_STACK prompts seen in earlier
+          # build logs), instead of the build silently hanging/failing there.
+          yes "" | make olddefconfig
 
           echo "=== Applied BPF/related config — confirm nothing silently dropped ==="
-          grep -E "^CONFIG_(BPF|KPROBE|NET_CLS|NET_ACT|NETFILTER_XT_MATCH_BPF|PERF_EVENTS)" .config
+          grep -E "^CONFIG_(BPF|KPROBE|NET_CLS|NET_ACT|NETFILTER_XT_MATCH_BPF|PERF_EVENTS|CGROUP_SCHED|FAIR_GROUP_SCHED)" .config
+
+      - name: Download AOSP Clang r383902 (pinned by this kernel's build.config)
+        run: |
+          set -euo pipefail
+          mkdir -p toolchains/clang
+          cd toolchains/clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r28/clang-r383902.tar.gz
+          tar -xf clang-r383902.tar.gz
+          test -x bin/clang || { echo "ERROR: clang binary missing after extraction"; exit 1; }
+          test -x bin/ld.lld || { echo "ERROR: ld.lld missing after extraction"; exit 1; }
 
       - name: Compile Kernel
         run: |
