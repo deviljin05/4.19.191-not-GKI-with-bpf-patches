@@ -43,8 +43,8 @@ jobs:
           chmod +x workdir/magiskboot
 
       - name: Unpack Stock Boot Image & Extract Kernel Binary
+        working-directory: workdir
         run: |
-          cd workdir
           ./magiskboot unpack boot.img
           if [ ! -f "kernel" ]; then
             echo "ERROR: Kernel binary extract nahi hua!"
@@ -53,9 +53,8 @@ jobs:
           echo "Kernel binary extracted successfully."
 
       - name: Patch Kernel Binary & Ramdisk for BPF Configs
+        working-directory: workdir
         run: |
-          cd workdir
-          
           # Binary Hex-patching Kernel Image
           python3 -c '
           with open("kernel", "rb") as f:
@@ -87,8 +86,8 @@ jobs:
           fi
 
       - name: Repack Patched Kernel & Boot Image
+        working-directory: workdir
         run: |
-          cd workdir
           ./magiskboot repack boot.img patched_boot.img
           
           if [ -f "patched_boot.img" ]; then
