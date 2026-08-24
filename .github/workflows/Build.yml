@@ -1,73 +1,144 @@
-name: Unzip Extracted Boot & Apply BPF Patches
+name: Build MT6877 Kernel Source with Full BPF Support
 on:
   workflow_dispatch: {}
 
 jobs:
-  repack-boot:
+  build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
+          sudo apt-get install -y \
+            make bc bison flex libssl-dev libelf-dev libncurses5-dev \
+            git curl wget zip unzip cpio python3 python3-pip clang llvm lld
 
-      - name: Create Work Directory & Download Zip from MediaFire
+      - name: Clone OnePlus MT6877 Kernel Source
+        run: |
+          echo "Cloning Kernel Source..."
+          git clone --depth=1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6877 kernel_src
+
+      - name: Download Toolchains (AOSP Clang & GCC)
+        run: |
+          mkdir -p toolchains
+          cd toolchains
+          echo "Downloading AOSP Clang toolchain..."
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
+          
+          echo "Downloading GCC Cross-Compilers..."
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+
+      - name: Download Original Stock Boot Files (MediaFire)
         run: |
           mkdir -p workdir
-          echo "Downloading zip file from MediaFire..."
-          
-          # Direct MediaFire Download URL extraction
+          echo "Fetching stock boot contents from MediaFire..."
           MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
           DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
 
-          if [ -z "$DIRECT_URL" ]; then
-            echo "ERROR: MediaFire se direct download link scan nahi ho saka!"
-            exit 1
+          if [ -n "$DIRECT_URL" ]; then
+            wget -O workdir/boot_contents.zip "$DIRECT_URL"
+            cd workdir && unzip -o boot_contents.zip && cd ..
+            # Flatten subdirectories
+            find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
+          else
+            echo "WARNING: Could not fetch stock boot zip, will generate standalone kernel output."
           fi
 
-          wget -O workdir/boot_contents.zip "$DIRECT_URL"
-
-          if [ ! -f "workdir/boot_contents.zip" ] || [ ! -s "workdir/boot_contents.zip" ]; then
-            echo "ERROR: MediaFire file download fail ho gayi!"
-            exit 1
+      - name: Setup Defconfig and Inject Complete BPF Kconfigs
+        run: |
+          cd kernel_src
+          
+          # Find default defconfig
+          DEFCONFIG_FILE=""
+          if [ -f "arch/arm64/configs/mt6877_defconfig" ]; then
+            DEFCONFIG_FILE="mt6877_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/mt6877_defconfig" ]; then
+            DEFCONFIG_FILE="vendor/mt6877_defconfig"
+          else
+            DEFCONFIG_FILE=$(find arch/arm64/configs -name "*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           fi
 
-      - name: Extract Zip Contents
-        working-directory: workdir
-        run: |
-          echo "Unzipping uploaded archive..."
-          unzip -o boot_contents.zip
-          
-          # Nested sub-folders handling (saari files ko root workdir me lane ke liye)
-          find . -mindepth 2 -type f -exec mv {} . \; 2>/dev/null || true
-          
-          echo "Extracted directory contents:"
-          ls -la
+          echo "Using Defconfig: $DEFCONFIG_FILE"
 
-      - name: Setup Repack Tool (magiskboot)
+          # Export Environment
+          export ARCH=arm64
+          make $DEFCONFIG_FILE
+
+          # Inject Full Production-Grade eBPF Config Flags
+          cat << 'EOF' >> .config
+
+          # === Android eBPF Core Requirements ===
+          CONFIG_BPF=y
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_NET_CLS_ACT=y
+          CONFIG_NET_ACT_BPF=y
+          CONFIG_NET_CLS_BPF=y
+          CONFIG_BPF_JIT=y
+          CONFIG_BPF_JIT_ALWAYS_ON=y
+          CONFIG_HAVE_EBPF_JIT=y
+          CONFIG_BPF_EVENTS=y
+          CONFIG_BPF_STREAM_PARSER=y
+
+          # === Cgroup and Networking BPF Hooks ===
+          CONFIG_CGROUP_BPF=y
+          CONFIG_NETFILTER_XT_MATCH_BPF=y
+          CONFIG_BPF_LSM=y
+          CONFIG_NET_SCH_INGRESS=y
+
+          # === Advanced Kernel Tracing & BPF Map Extensions ===
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_BPF_KPROBE_OVERRIDE=y
+          CONFIG_UPROBES=y
+          CONFIG_UPROBE_EVENTS=y
+          CONFIG_PROBE_EVENTS=y
+          CONFIG_TRACEPOINTS=y
+          EOF
+
+          # Regenerate finalized .config with dependencies resolved
+          make olddefconfig
+
+      - name: Compile Kernel
         run: |
-          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
+          cd kernel_src
+          
+          PATH="$(pwd)/../toolchains/clang/bin:$(pwd)/../toolchains/gcc64/bin:$(pwd)/../toolchains/gcc32/bin:${PATH}"
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
+
+      - name: Setup Repack Tools (magiskboot)
+        run: |
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
           mv workdir/lib/x86_64/libmagiskboot.so workdir/magiskboot
           rm -rf workdir/lib Magisk-v27.0.apk
           chmod +x workdir/magiskboot
 
-      - name: Unpack boot.img (If present as image file)
-        working-directory: workdir
+      - name: Pack Compiled Kernel into Stock Boot Container
         run: |
-          if [ -f "boot.img" ] && [ ! -f "ramdisk.cpio" ]; then
-            echo "Unpacking boot.img file..."
-            ./magiskboot unpack boot.img
+          # Copy newly compiled kernel image
+          if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
+            cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
+          elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
+            cp kernel_src/arch/arm64/boot/Image workdir/kernel
           fi
 
-      - name: Apply BPF Init Configurations to Ramdisk
-        working-directory: workdir
-        run: |
+          cd workdir
+
+          # Inject BPF initialization rules into ramdisk.cpio
           if [ -f "ramdisk.cpio" ]; then
-            echo "Injecting BPF startup rules into ramdisk.cpio..."
             cat > init.bpf.rc << 'EOF'
           on early-init
               mkdir /sys/fs/bpf 0770 root system
@@ -79,42 +150,26 @@ jobs:
               write /proc/sys/net/core/bpf_jit_kallsyms 1
           EOF
 
-            ./magiskboot cpio ramdisk.cpio \
-              "add 0755 init.bpf.rc init.bpf.rc" \
-              "patch"
-          else
-            echo "Warning: ramdisk.cpio nahi mili!"
+            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
           fi
 
-      - name: Repack Patched Boot Image
-        working-directory: workdir
-        run: |
+          # Repack patched boot image
           if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img patched_boot.img
+            ./magiskboot repack boot.img bpf_compiled_boot.img
           else
-            ./magiskboot repack kernel patched_boot.img
+            ./magiskboot repack kernel bpf_compiled_boot.img
           fi
 
-          if [ -f "patched_boot.img" ]; then
-            echo "Successfully repacked patched_boot.img!"
-          elif [ -f "new-boot.img" ]; then
-            mv new-boot.img patched_boot.img
-            echo "Successfully repacked patched_boot.img!"
-          else
-            echo "ERROR: Repack process fail ho gaya!"
-            exit 1
-          fi
-
-      - name: Prepare Clean AnyKernel3 Flashable Zip
+      - name: Build AnyKernel3 Flashable Zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## Infinix Zero 5G 2023 — BPF Patched Boot (Repacked)
+          ## MT6877 Custom Kernel — Full BPF Compiled
 
           properties() { '
-          kernel.string=Infinix Zero 5G 2023 BPF Repacked Boot
+          kernel.string=Infinix/MT6877 Full BPF Compiled Kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -132,21 +187,19 @@ jobs:
           write_boot;
           EOF
 
-          cp workdir/patched_boot.img anykernel3/boot.img
-
+          cp workdir/bpf_compiled_boot.img anykernel3/boot.img
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          ZIP_NAME="InfinixZero5G2023-BPF-Patched-Boot.zip"
-          zip -r9 "../$ZIP_NAME" . -x ".git/*"
+          zip -r9 "../MT6877-BPF-Compiled-Kernel-Zip.zip" . -x ".git/*"
 
-      - name: Upload Repacked boot.img File
+      - name: Upload Repacked Compiled Boot Image
         uses: actions/upload-artifact@v4
         with:
-          name: BPF-Patched-boot.img
-          path: workdir/patched_boot.img
+          name: MT6877-BPF-Compiled-boot.img
+          path: workdir/bpf_compiled_boot.img
 
-      - name: Upload Flashable AnyKernel3 Zip
+      - name: Upload AnyKernel3 Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero-5G-2023-BPF-Zip
-          path: InfinixZero5G2023-BPF-Patched-Boot.zip
+          name: MT6877-BPF-Compiled-Kernel-Zip
+          path: MT6877-BPF-Compiled-Kernel-Zip.zip
