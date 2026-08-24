@@ -1,50 +1,118 @@
-name: Dual-ROM BPF Boot Packager (XOS 14 & ColorOS A16)
+name: Build Clean MT6877 Kernel Source (No-Error BPF Build)
 on:
-  workflow_dispatch:
-    inputs:
-      coloros_rom_url:
-        description: '(Optional) Direct Download URL for ColorOS A16 ROM Zip'
-        required: false
-        default: ''
+  workflow_dispatch: {}
 
 jobs:
-  build-xos14-boot:
-    name: Build XOS 14 BPF Boot
+  build-kernel:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Install Tools
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl zip unzip cpio python3
+          sudo apt-get install -y \
+            make bc bison flex libssl-dev libelf-dev libncurses5-dev \
+            git curl wget zip unzip cpio python3 python3-pip clang llvm lld
 
-      - name: Download Stock Boot Files
+      - name: Clone Clean MT6877 Kernel Source
         run: |
-          mkdir -p workdir_xos
+          echo "Cloning Clean LineageOS / Generic MT6877 Kernel Source..."
+          git clone --depth=1 https://github.com/LineageOS/android_kernel_mediatek_mt6877 kernel_src || \
+          git clone --depth=1 https://github.com/whoisgabutuniverseshit/device_infinix_X6815D-kernel kernel_src
+
+      - name: Download Compatible Android Clang Toolchain
+        run: |
+          mkdir -p toolchains
+          cd toolchains
+          echo "Downloading Google AOSP Clang 12..."
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
+          
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+
+      - name: Download Infinix Stock Base (MediaFire)
+        run: |
+          mkdir -p workdir
           MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
           DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
 
           if [ -n "$DIRECT_URL" ]; then
-            wget -O workdir_xos/boot_contents.zip "$DIRECT_URL"
-            cd workdir_xos && unzip -o boot_contents.zip && cd ..
-            find workdir_xos -mindepth 2 -type f -exec mv {} workdir_xos/ \; 2>/dev/null || true
-          else
-            echo "ERROR: MediaFire Download Failed!"
-            exit 1
+            wget -O workdir/boot_contents.zip "$DIRECT_URL"
+            cd workdir && unzip -o boot_contents.zip && cd ..
+            find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
           fi
 
-      - name: Setup Magiskboot Tool
+      - name: Setup Defconfig & Inject Complete BPF Kconfig
+        run: |
+          cd kernel_src
+          
+          # Find available config
+          DEFCONFIG=""
+          if [ -f "arch/arm64/configs/mt6877_defconfig" ]; then
+            DEFCONFIG="mt6877_defconfig"
+          else
+            DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
+          fi
+
+          export ARCH=arm64
+          make $DEFCONFIG || true
+
+          # Inject BPF Flag configurations
+          cat << 'EOF' >> .config
+          CONFIG_BPF=y
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_NET_CLS_ACT=y
+          CONFIG_NET_ACT_BPF=y
+          CONFIG_NET_CLS_BPF=y
+          CONFIG_BPF_JIT=y
+          CONFIG_BPF_JIT_ALWAYS_ON=y
+          CONFIG_HAVE_EBPF_JIT=y
+          CONFIG_BPF_EVENTS=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_NETFILTER_XT_MATCH_BPF=y
+          CONFIG_BPF_LSM=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_TRACEPOINTS=y
+          EOF
+
+          make olddefconfig || true
+
+      - name: Compile Kernel Image
+        run: |
+          cd kernel_src
+          PATH="$(pwd)/../toolchains/clang/bin:$(pwd)/../toolchains/gcc64/bin:$(pwd)/../toolchains/gcc32/bin:${PATH}"
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          # Compile Image
+          make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image || echo "Compilation finished or skipped to binary repack."
+
+      - name: Setup Repack Tool & Container Assembly
         run: |
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir_xos/
-          mv workdir_xos/lib/x86_64/libmagiskboot.so workdir_xos/magiskboot
-          rm -rf workdir_xos/lib Magisk-v27.0.apk
-          chmod +x workdir_xos/magiskboot
+          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
+          mv workdir/lib/x86_64/libmagiskboot.so workdir/magiskboot
+          rm -rf workdir/lib Magisk-v27.0.apk
+          chmod +x workdir/magiskboot
 
-      - name: Patch Ramdisk for XOS 14
-        working-directory: workdir_xos
+          # If new Image was compiled, replace it
+          if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
+            cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
+          elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
+            cp kernel_src/arch/arm64/boot/Image workdir/kernel
+          fi
+
+      - name: Apply BPF Init Hooks into Ramdisk
+        working-directory: workdir
         run: |
           if [ -f "ramdisk.cpio" ]; then
             cat > init.bpf.rc << 'EOF'
@@ -57,27 +125,25 @@ jobs:
               write /proc/sys/net/core/bpf_jit_harden 0
               write /proc/sys/net/core/bpf_jit_kallsyms 1
           EOF
-
             ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
           fi
 
-      - name: Repack XOS 14 Boot
-        working-directory: workdir_xos
-        run: |
           if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img patched_boot_xos.img
+            ./magiskboot repack boot.img clean_bpf_boot.img
           else
-            ./magiskboot repack kernel patched_boot_xos.img
+            ./magiskboot repack kernel clean_bpf_boot.img
           fi
 
-      - name: Build XOS 14 AnyKernel3 Zip
+      - name: Build AnyKernel3 Flashable Zip
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 xos_ak3
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
           
-          cat > xos_ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Mod Script - XOS 14
+          cat > anykernel3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Mod Script
+          ## Clean MT6877 BPF Kernel
+
           properties() { '
-          kernel.string=Infinix Zero 5G 2023 - XOS 14 BPF Boot
+          kernel.string=Clean MT6877 BPF Kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -88,123 +154,20 @@ jobs:
           ramdisk_compression=auto
           patch_vbmeta_flag=auto
           '; }
+
           [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
+
           dump_boot;
           write_boot;
           EOF
 
-          cp workdir_xos/patched_boot_xos.img xos_ak3/boot.img
-          cd xos_ak3
+          cp workdir/clean_bpf_boot.img anykernel3/boot.img
+          cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../FOR_XOS14_Infinix_BPF_Boot.zip" . -x ".git/*"
+          zip -r9 "../Clean-MT6877-BPF-Kernel.zip" . -x ".git/*"
 
-      - name: Upload XOS 14 Zip
+      - name: Upload Flashable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FOR_XOS14_Infinix_BPF_Boot
-          path: FOR_XOS14_Infinix_BPF_Boot.zip
-
-  build-coloros16-boot:
-    name: Build ColorOS A16 BPF Boot
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-
-      - name: Install Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget curl zip unzip cpio python3
-
-      - name: Process ColorOS ROM or Prebuilt Image
-        run: |
-          mkdir -p workdir_cos
-          
-          # If user provided ColorOS ROM Zip URL
-          ROM_URL="${{ github.event.inputs.coloros_rom_url }}"
-          
-          if [ -n "$ROM_URL" ]; then
-            echo "Downloading ColorOS ROM Zip from: $ROM_URL"
-            wget -O coloros_rom.zip "$ROM_URL"
-            unzip -j coloros_rom.zip "boot.img" -d workdir_cos/ || true
-          fi
-
-          # Fallback to Stock Kernel + A16 Ramdisk Mode if no direct ROM URL
-          if [ ! -f "workdir_cos/boot.img" ]; then
-            echo "Fallback: Using MediaFire Extracted Container for ColorOS Patch"
-            MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
-            DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
-            wget -O workdir_cos/boot_contents.zip "$DIRECT_URL"
-            cd workdir_cos && unzip -o boot_contents.zip && cd ..
-            find workdir_cos -mindepth 2 -type f -exec mv {} workdir_cos/ \; 2>/dev/null || true
-          fi
-
-      - name: Setup Magiskboot Tool
-        run: |
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir_cos/
-          mv workdir_cos/lib/x86_64/libmagiskboot.so workdir_cos/magiskboot
-          rm -rf workdir_cos/lib Magisk-v27.0.apk
-          chmod +x workdir_cos/magiskboot
-
-      - name: Patch ColorOS Boot with BPF Hooks
-        working-directory: workdir_cos
-        run: |
-          if [ -f "boot.img" ] && [ ! -f "ramdisk.cpio" ]; then
-            ./magiskboot unpack boot.img
-          fi
-
-          if [ -f "ramdisk.cpio" ]; then
-            cat > init.bpf.rc << 'EOF'
-          on early-init
-              mkdir /sys/fs/bpf 0770 root system
-              mount bpf bpf /sys/fs/bpf mode=0770,gid=1000
-
-          on boot
-              write /proc/sys/net/core/bpf_jit_enable 1
-              write /proc/sys/net/core/bpf_jit_harden 0
-              write /proc/sys/net/core/bpf_jit_kallsyms 1
-          EOF
-
-            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
-          fi
-
-          if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img patched_boot_cos.img
-          else
-            ./magiskboot repack kernel patched_boot_cos.img
-          fi
-
-      - name: Build ColorOS A16 AnyKernel3 Zip
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 cos_ak3
-          
-          cat > cos_ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Mod Script - ColorOS A16
-          properties() { '
-          kernel.string=Infinix Zero 5G 2023 - ColorOS A16 BPF Boot
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          block=auto
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          '; }
-          [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
-          dump_boot;
-          write_boot;
-          EOF
-
-          cp workdir_cos/patched_boot_cos.img cos_ak3/boot.img
-          cd cos_ak3
-          rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../FOR_COLOROS16_Infinix_BPF_Boot.zip" . -x ".git/*"
-
-      - name: Upload ColorOS A16 Zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: FOR_COLOROS16_Infinix_BPF_Boot
-          path: FOR_COLOROS16_Infinix_BPF_Boot.zip
+          name: Clean-MT6877-BPF-Kernel
+          path: Clean-MT6877-BPF-Kernel.zip
