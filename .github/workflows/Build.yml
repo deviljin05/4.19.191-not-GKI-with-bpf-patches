@@ -39,22 +39,51 @@ jobs:
       #      something the BPF config path needs. Rather than fabricate a
       #      missing vendor header, its build rule is dropped from
       #      kernel/trace/Makefile so it's never compiled.
+      # NOTE: this angled-vs-quoted bug is not confined to one file per header —
+      # the same local header gets #include <...>'d from several .c/.h files
+      # across a directory (e.g. helio-dvfsrc-qos.h is pulled in by both
+      # helio-dvfsrc-qos.c AND helio-dvfsrc-sysfs.c AND helio-dvfsrc-ip-v2.h).
+      # So instead of patching one file at a time whack-a-mole style, every
+      # known-broken header is fixed tree-wide, in every file that includes it.
+      # If a future build log shows the same "file not found with <angled>
+      # include; use quotes instead" error for a header not in this list,
+      # just add its filename to BROKEN_LOCAL_HEADERS below.
       - name: Patch Known Source Issues
         run: |
           set -euo pipefail
           cd kernel_src
 
-          sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/' \
-            drivers/cpuidle/cpuidle-mediatek.c
+          BROKEN_LOCAL_HEADERS="
+            dt_idle_states.h
+            helio-dvfsrc-qos.h
+            mtk_dvfsrc_reg_v2.h
+            mtk_dvfsrc_smc_reg.h
+            mtk-dsp-mem-control.h
+            mtk-base-dsp.h
+            mtk-dsp-common.h
+          "
 
-          sed -i 's/#include <helio-dvfsrc-qos\.h>/#include "helio-dvfsrc-qos.h"/' \
-            drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c
+          for header in $BROKEN_LOCAL_HEADERS; do
+            escaped=$(printf '%s' "$header" | sed 's/[.[\*^$/]/\\&/g')
+            matches=$(grep -rl "#include <${header}>" --include='*.c' --include='*.h' . || true)
+            if [ -z "$matches" ]; then
+              echo "NOTE: no angled #include <${header}> found (already clean, or not present)"
+              continue
+            fi
+            echo "$matches" | while IFS= read -r f; do
+              sed -i "s/#include <${escaped}>/#include \"${header}\"/" "$f"
+              echo "patched: $f"
+            done
+          done
 
           sed -i '/mtk_trace\.o/d' kernel/trace/Makefile
 
-          echo "=== Confirm patches applied ==="
-          grep -n 'dt_idle_states.h' drivers/cpuidle/cpuidle-mediatek.c
-          grep -n 'helio-dvfsrc-qos.h' drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c
+          echo "=== Confirm no angled includes remain for known-broken headers ==="
+          for header in $BROKEN_LOCAL_HEADERS; do
+            grep -rl "#include <${header}>" --include='*.c' --include='*.h' . && \
+              { echo "ERROR: ${header} still angled-included somewhere"; exit 1; }
+          done
+          echo "clean"
           grep -n 'mtk_trace' kernel/trace/Makefile || echo "mtk_trace.o reference removed"
 
       # ruby_defconfig (this tree's device fragment) has NO binder/ashmem/
