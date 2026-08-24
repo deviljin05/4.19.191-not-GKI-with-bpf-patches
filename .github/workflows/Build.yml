@@ -1,4 +1,4 @@
-name: Build Clean MT6877 Kernel Source (Proper GCC 10+ Compilation)
+name: Build Clean MT6877 Kernel Source (Strict Compilation)
 on:
   workflow_dispatch: {}
 
@@ -22,20 +22,25 @@ jobs:
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b ruby-s-oss kernel_src || \
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6877 kernel_src
 
-      - name: Download Modern Compiler Toolchains (GCC 10.3 + Clang 13)
+          if [ ! -d "kernel_src" ]; then
+            echo "ERROR: Failed to clone kernel source repository."
+            exit 1
+          fi
+
+      - name: Download Stable Compiler Toolchains (Clang + AOSP GCC)
         run: |
           mkdir -p toolchains
           cd toolchains
           
-          # Download Modern Clang 13+
+          # Download AOSP Clang 13
           echo "Downloading AOSP Clang 13..."
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz
           mkdir clang && tar -xf clang-r450784d.tar.gz -C clang
           
-          # Download GCC 10.3 / 9.3 for Modern Kernel Build
-          echo "Downloading GCC 10.3 Toolchains..."
-          git clone --depth=1 https://github.com/Starlight-524/aarch64-linux-gnu-10.3 gcc64
-          git clone --depth=1 https://github.com/Starlight-524/arm-linux-gnueabi-10.3 gcc32
+          # Download Stable GCC Cross-Compilers
+          echo "Downloading Cross-Compiler Toolchains..."
+          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
 
       - name: Download Infinix Stock Base (MediaFire)
         run: |
@@ -65,7 +70,7 @@ jobs:
             make $DEFCONFIG || true
           fi
 
-          # Inject BPF Flag configurations
+          # Inject BPF Configurations
           cat << 'EOF' >> .config
           CONFIG_BPF=y
           CONFIG_BPF_SYSCALL=y
@@ -90,7 +95,6 @@ jobs:
         run: |
           cd kernel_src
           
-          # Set compiler PATH to GCC 10 + Clang
           CLANG_DIR="$(pwd)/../toolchains/clang/bin"
           GCC64_DIR="$(pwd)/../toolchains/gcc64/bin"
           GCC32_DIR="$(pwd)/../toolchains/gcc32/bin"
@@ -101,21 +105,15 @@ jobs:
           export SUBARCH=arm64
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
           echo "Starting C/C++ Kernel Source Compile..."
           make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
 
-      - name: Verify & Repack Compiled Kernel
+      - name: Verify Compiled Kernel Output
         run: |
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
-          mv workdir/lib/x86_64/libmagiskboot.so workdir/magiskboot
-          rm -rf workdir/lib Magisk-v27.0.apk
-          chmod +x workdir/magiskboot
-
-          # Confirm fresh kernel image exists
+          # Strict Verification Step: Stops workflow if compilation fails
           if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
             echo "SUCCESS: Fresh compiled Image.gz found!"
             cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
@@ -123,13 +121,19 @@ jobs:
             echo "SUCCESS: Fresh compiled Image found!"
             cp kernel_src/arch/arm64/boot/Image workdir/kernel
           else
-            echo "ERROR: Compilation failed to generate Image!"
+            echo "ERROR: Kernel Compilation Failed! No Image or Image.gz generated."
             exit 1
           fi
 
-      - name: Apply BPF Init Hooks into Ramdisk
+      - name: Setup Repack Tool & BPF Ramdisk Patch
         working-directory: workdir
         run: |
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d ./
+          mv lib/x86_64/libmagiskboot.so ./magiskboot
+          rm -rf lib Magisk-v27.0.apk
+          chmod +x magiskboot
+
           if [ -f "ramdisk.cpio" ]; then
             cat > init.bpf.rc << 'EOF'
           on early-init
@@ -145,9 +149,9 @@ jobs:
           fi
 
           if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img clean_bpf_boot.img
+            ./magiskboot repack boot.img compiled_bpf_boot.img
           else
-            ./magiskboot repack kernel clean_bpf_boot.img
+            ./magiskboot repack kernel compiled_bpf_boot.img
           fi
 
       - name: Build AnyKernel3 Flashable Zip
@@ -177,7 +181,7 @@ jobs:
           write_boot;
           EOF
 
-          cp workdir/clean_bpf_boot.img anykernel3/boot.img
+          cp workdir/compiled_bpf_boot.img anykernel3/boot.img
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
           zip -r9 "../Proper-Compiled-MT6877-BPF-Kernel.zip" . -x ".git/*"
