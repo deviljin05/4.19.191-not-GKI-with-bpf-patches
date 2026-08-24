@@ -26,22 +26,36 @@ jobs:
           echo "Kernel version:"
           grep -m3 -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" kernel_src/Makefile
 
-      # Two known source-level breakages in this tree that show up regardless
-      # of the BPF config additions below:
+      # Known source-level breakages in this tree that show up regardless of
+      # the BPF config additions below:
       #   1. drivers/cpuidle/cpuidle-mediatek.c includes a local header with
       #      <angled> brackets instead of "quotes", so clang's include search
       #      never finds it (it's not a system header).
-      # Patched here, before config merge/build, so both failure points in the
-      # earlier logs (kernel/sched/extension/eas_plus.o and
-      # drivers/cpuidle/cpuidle-mediatek.o) are handled.
+      #   2. drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c has the exact
+      #      same angled-vs-quoted bug for its own local header.
+      #   3. kernel/trace/mtk_trace.c #includes mtk_ftrace.h via the
+      #      TRACE_INCLUDE_PATH machinery, but mtk_ftrace.h doesn't exist
+      #      anywhere in this tree — it's an orphaned vendor trace file, not
+      #      something the BPF config path needs. Rather than fabricate a
+      #      missing vendor header, its build rule is dropped from
+      #      kernel/trace/Makefile so it's never compiled.
       - name: Patch Known Source Issues
         run: |
           set -euo pipefail
           cd kernel_src
+
           sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/' \
             drivers/cpuidle/cpuidle-mediatek.c
-          echo "=== Confirm patch applied ==="
+
+          sed -i 's/#include <helio-dvfsrc-qos\.h>/#include "helio-dvfsrc-qos.h"/' \
+            drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c
+
+          sed -i '/mtk_trace\.o/d' kernel/trace/Makefile
+
+          echo "=== Confirm patches applied ==="
           grep -n 'dt_idle_states.h' drivers/cpuidle/cpuidle-mediatek.c
+          grep -n 'helio-dvfsrc-qos.h' drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c
+          grep -n 'mtk_trace' kernel/trace/Makefile || echo "mtk_trace.o reference removed"
 
       # ruby_defconfig (this tree's device fragment) has NO binder/ashmem/
       # netfilter/net_sched entries at all, same as the stock repo's fragment —
