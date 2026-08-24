@@ -1,124 +1,41 @@
-name: Build MT6877 Kernel Source with Full BPF Support
+name: Option 3 - Prebuilt Kernel Tree BPF Repack
 on:
   workflow_dispatch: {}
 
 jobs:
-  build-kernel:
+  build-boot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Install Build Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            make bc bison flex libssl-dev libelf-dev libncurses5-dev \
-            git curl wget zip unzip cpio python3 python3-pip clang llvm lld
+          sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
 
-      - name: Clone OnePlus MT6877 Kernel Source
+      - name: Clone Infinix Zero 5G 2023 Prebuilt Kernel Tree
         run: |
-          echo "Cloning Kernel Source..."
-          git clone --depth=1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6877 kernel_src
+          echo "Cloning Prebuilt Kernel Tree for Infinix Zero 5G 2023 (X6815D)..."
+          git clone --depth=1 https://github.com/whoisgabutuniverseshit/device_infinix_X6815D-kernel prebuilt_tree
 
-      - name: Download Toolchains (AOSP Clang & GCC)
-        run: |
-          mkdir -p toolchains
-          cd toolchains
-          echo "Downloading AOSP Clang toolchain..."
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
-          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
-          
-          echo "Downloading GCC Cross-Compilers..."
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
-
-      - name: Download Original Stock Boot Files (MediaFire)
+      - name: Create Work Directory & Download Stock Extracted Files
         run: |
           mkdir -p workdir
-          echo "Fetching stock boot contents from MediaFire..."
+          echo "Downloading base stock files from MediaFire..."
           MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
           DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
 
           if [ -n "$DIRECT_URL" ]; then
             wget -O workdir/boot_contents.zip "$DIRECT_URL"
             cd workdir && unzip -o boot_contents.zip && cd ..
-            # Flatten subdirectories
             find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
           else
-            echo "WARNING: Could not fetch stock boot zip, will generate standalone kernel output."
+            echo "ERROR: MediaFire download failed!"
+            exit 1
           fi
 
-      - name: Setup Defconfig and Inject Complete BPF Kconfigs
-        run: |
-          cd kernel_src
-          
-          # Find default defconfig
-          DEFCONFIG_FILE=""
-          if [ -f "arch/arm64/configs/mt6877_defconfig" ]; then
-            DEFCONFIG_FILE="mt6877_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/mt6877_defconfig" ]; then
-            DEFCONFIG_FILE="vendor/mt6877_defconfig"
-          else
-            DEFCONFIG_FILE=$(find arch/arm64/configs -name "*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
-          fi
-
-          echo "Using Defconfig: $DEFCONFIG_FILE"
-
-          # Export Environment
-          export ARCH=arm64
-          make $DEFCONFIG_FILE
-
-          # Inject Full Production-Grade eBPF Config Flags
-          cat << 'EOF' >> .config
-
-          # === Android eBPF Core Requirements ===
-          CONFIG_BPF=y
-          CONFIG_BPF_SYSCALL=y
-          CONFIG_NET_CLS_ACT=y
-          CONFIG_NET_ACT_BPF=y
-          CONFIG_NET_CLS_BPF=y
-          CONFIG_BPF_JIT=y
-          CONFIG_BPF_JIT_ALWAYS_ON=y
-          CONFIG_HAVE_EBPF_JIT=y
-          CONFIG_BPF_EVENTS=y
-          CONFIG_BPF_STREAM_PARSER=y
-
-          # === Cgroup and Networking BPF Hooks ===
-          CONFIG_CGROUP_BPF=y
-          CONFIG_NETFILTER_XT_MATCH_BPF=y
-          CONFIG_BPF_LSM=y
-          CONFIG_NET_SCH_INGRESS=y
-
-          # === Advanced Kernel Tracing & BPF Map Extensions ===
-          CONFIG_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_BPF_KPROBE_OVERRIDE=y
-          CONFIG_UPROBES=y
-          CONFIG_UPROBE_EVENTS=y
-          CONFIG_PROBE_EVENTS=y
-          CONFIG_TRACEPOINTS=y
-          EOF
-
-          # Regenerate finalized .config with dependencies resolved
-          make olddefconfig
-
-      - name: Compile Kernel
-        run: |
-          cd kernel_src
-          
-          PATH="$(pwd)/../toolchains/clang/bin:$(pwd)/../toolchains/gcc64/bin:$(pwd)/../toolchains/gcc32/bin:${PATH}"
-          
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-
-          make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
-
-      - name: Setup Repack Tools (magiskboot)
+      - name: Setup Repack Tool (magiskboot)
         run: |
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
@@ -126,19 +43,29 @@ jobs:
           rm -rf workdir/lib Magisk-v27.0.apk
           chmod +x workdir/magiskboot
 
-      - name: Pack Compiled Kernel into Stock Boot Container
+      - name: Use Prebuilt Kernel Image & DTBs
         run: |
-          # Copy newly compiled kernel image
-          if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
-            cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
-          elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
-            cp kernel_src/arch/arm64/boot/Image workdir/kernel
+          echo "Merging Prebuilt Kernel and DTBs into workspace..."
+          
+          # Check and copy prebuilt kernel binary if available in the tree
+          if [ -f "prebuilt_tree/kernel" ]; then
+            cp prebuilt_tree/kernel workdir/kernel
+            echo "Prebuilt kernel replaced successfully."
+          elif [ -f "prebuilt_tree/Image.gz" ]; then
+            cp prebuilt_tree/Image.gz workdir/kernel
+            echo "Prebuilt Image.gz replaced successfully."
           fi
 
-          cd workdir
+          # Copy dtb or dtbo if available in tree
+          if [ -f "prebuilt_tree/dtb" ]; then
+            cp prebuilt_tree/dtb workdir/dtb
+          fi
 
-          # Inject BPF initialization rules into ramdisk.cpio
+      - name: Apply BPF Patches to Ramdisk
+        working-directory: workdir
+        run: |
           if [ -f "ramdisk.cpio" ]; then
+            echo "Injecting BPF startup rules into ramdisk.cpio..."
             cat > init.bpf.rc << 'EOF'
           on early-init
               mkdir /sys/fs/bpf 0770 root system
@@ -150,26 +77,43 @@ jobs:
               write /proc/sys/net/core/bpf_jit_kallsyms 1
           EOF
 
-            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
-          fi
-
-          # Repack patched boot image
-          if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img bpf_compiled_boot.img
+            ./magiskboot cpio ramdisk.cpio \
+              "add 0755 init.bpf.rc init.bpf.rc" \
+              "patch"
+            echo "BPF ramdisk patch complete."
           else
-            ./magiskboot repack kernel bpf_compiled_boot.img
+            echo "Warning: ramdisk.cpio not found!"
           fi
 
-      - name: Build AnyKernel3 Flashable Zip
+      - name: Repack ColorOS A16 / Infinix Compatible Boot Image
+        working-directory: workdir
+        run: |
+          if [ -f "boot.img" ]; then
+            ./magiskboot repack boot.img patched_boot.img
+          else
+            ./magiskboot repack kernel patched_boot.img
+          fi
+
+          if [ -f "patched_boot.img" ]; then
+            echo "Successfully repacked patched_boot.img!"
+          elif [ -f "new-boot.img" ]; then
+            mv new-boot.img patched_boot.img
+            echo "Successfully repacked patched_boot.img!"
+          else
+            echo "ERROR: Repack failed!"
+            exit 1
+          fi
+
+      - name: Prepare AnyKernel3 Flashable Zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## MT6877 Custom Kernel — Full BPF Compiled
+          ## Infinix Zero 5G 2023 — Prebuilt Tree BPF Boot
 
           properties() { '
-          kernel.string=Infinix/MT6877 Full BPF Compiled Kernel
+          kernel.string=Infinix Zero 5G 2023 BPF Repacked Boot
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -187,19 +131,21 @@ jobs:
           write_boot;
           EOF
 
-          cp workdir/bpf_compiled_boot.img anykernel3/boot.img
+          cp workdir/patched_boot.img anykernel3/boot.img
+
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../MT6877-BPF-Compiled-Kernel-Zip.zip" . -x ".git/*"
+          ZIP_NAME="InfinixZero5G2023-Option3-BPF-Boot.zip"
+          zip -r9 "../$ZIP_NAME" . -x ".git/*"
 
-      - name: Upload Repacked Compiled Boot Image
+      - name: Upload Repacked boot.img File
         uses: actions/upload-artifact@v4
         with:
-          name: MT6877-BPF-Compiled-boot.img
-          path: workdir/bpf_compiled_boot.img
+          name: Option3-BPF-boot.img
+          path: workdir/patched_boot.img
 
-      - name: Upload AnyKernel3 Flashable Zip
+      - name: Upload Flashable AnyKernel3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: MT6877-BPF-Compiled-Kernel-Zip
-          path: MT6877-BPF-Compiled-Kernel-Zip.zip
+          name: Option3-BPF-Flashable-Zip
+          path: InfinixZero5G2023-Option3-BPF-Boot.zip
