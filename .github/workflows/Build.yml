@@ -1,71 +1,52 @@
-name: Option 3 - Prebuilt Kernel Tree BPF Repack
+name: Dual-ROM BPF Boot Packager (XOS 14 & ColorOS A16)
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      coloros_rom_url:
+        description: '(Optional) Direct Download URL for ColorOS A16 ROM Zip'
+        required: false
+        default: ''
 
 jobs:
-  build-boot:
+  build-xos14-boot:
+    name: Build XOS 14 BPF Boot
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Workflow Repository
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
+          sudo apt-get install -y wget curl zip unzip cpio python3
 
-      - name: Clone Infinix Zero 5G 2023 Prebuilt Kernel Tree
+      - name: Download Stock Boot Files
         run: |
-          echo "Cloning Prebuilt Kernel Tree for Infinix Zero 5G 2023 (X6815D)..."
-          git clone --depth=1 https://github.com/whoisgabutuniverseshit/device_infinix_X6815D-kernel prebuilt_tree
-
-      - name: Create Work Directory & Download Stock Extracted Files
-        run: |
-          mkdir -p workdir
-          echo "Downloading base stock files from MediaFire..."
+          mkdir -p workdir_xos
           MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
           DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
 
           if [ -n "$DIRECT_URL" ]; then
-            wget -O workdir/boot_contents.zip "$DIRECT_URL"
-            cd workdir && unzip -o boot_contents.zip && cd ..
-            find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
+            wget -O workdir_xos/boot_contents.zip "$DIRECT_URL"
+            cd workdir_xos && unzip -o boot_contents.zip && cd ..
+            find workdir_xos -mindepth 2 -type f -exec mv {} workdir_xos/ \; 2>/dev/null || true
           else
-            echo "ERROR: MediaFire download failed!"
+            echo "ERROR: MediaFire Download Failed!"
             exit 1
           fi
 
-      - name: Setup Repack Tool (magiskboot)
+      - name: Setup Magiskboot Tool
         run: |
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
-          mv workdir/lib/x86_64/libmagiskboot.so workdir/magiskboot
-          rm -rf workdir/lib Magisk-v27.0.apk
-          chmod +x workdir/magiskboot
+          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir_xos/
+          mv workdir_xos/lib/x86_64/libmagiskboot.so workdir_xos/magiskboot
+          rm -rf workdir_xos/lib Magisk-v27.0.apk
+          chmod +x workdir_xos/magiskboot
 
-      - name: Use Prebuilt Kernel Image & DTBs
-        run: |
-          echo "Merging Prebuilt Kernel and DTBs into workspace..."
-          
-          # Check and copy prebuilt kernel binary if available in the tree
-          if [ -f "prebuilt_tree/kernel" ]; then
-            cp prebuilt_tree/kernel workdir/kernel
-            echo "Prebuilt kernel replaced successfully."
-          elif [ -f "prebuilt_tree/Image.gz" ]; then
-            cp prebuilt_tree/Image.gz workdir/kernel
-            echo "Prebuilt Image.gz replaced successfully."
-          fi
-
-          # Copy dtb or dtbo if available in tree
-          if [ -f "prebuilt_tree/dtb" ]; then
-            cp prebuilt_tree/dtb workdir/dtb
-          fi
-
-      - name: Apply BPF Patches to Ramdisk
-        working-directory: workdir
+      - name: Patch Ramdisk for XOS 14
+        working-directory: workdir_xos
         run: |
           if [ -f "ramdisk.cpio" ]; then
-            echo "Injecting BPF startup rules into ramdisk.cpio..."
             cat > init.bpf.rc << 'EOF'
           on early-init
               mkdir /sys/fs/bpf 0770 root system
@@ -77,43 +58,26 @@ jobs:
               write /proc/sys/net/core/bpf_jit_kallsyms 1
           EOF
 
-            ./magiskboot cpio ramdisk.cpio \
-              "add 0755 init.bpf.rc init.bpf.rc" \
-              "patch"
-            echo "BPF ramdisk patch complete."
-          else
-            echo "Warning: ramdisk.cpio not found!"
+            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
           fi
 
-      - name: Repack ColorOS A16 / Infinix Compatible Boot Image
-        working-directory: workdir
+      - name: Repack XOS 14 Boot
+        working-directory: workdir_xos
         run: |
           if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img patched_boot.img
+            ./magiskboot repack boot.img patched_boot_xos.img
           else
-            ./magiskboot repack kernel patched_boot.img
+            ./magiskboot repack kernel patched_boot_xos.img
           fi
 
-          if [ -f "patched_boot.img" ]; then
-            echo "Successfully repacked patched_boot.img!"
-          elif [ -f "new-boot.img" ]; then
-            mv new-boot.img patched_boot.img
-            echo "Successfully repacked patched_boot.img!"
-          else
-            echo "ERROR: Repack failed!"
-            exit 1
-          fi
-
-      - name: Prepare AnyKernel3 Flashable Zip
+      - name: Build XOS 14 AnyKernel3 Zip
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 xos_ak3
           
-          cat > anykernel3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Mod Script
-          ## Infinix Zero 5G 2023 — Prebuilt Tree BPF Boot
-
+          cat > xos_ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Mod Script - XOS 14
           properties() { '
-          kernel.string=Infinix Zero 5G 2023 BPF Repacked Boot
+          kernel.string=Infinix Zero 5G 2023 - XOS 14 BPF Boot
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -124,28 +88,123 @@ jobs:
           ramdisk_compression=auto
           patch_vbmeta_flag=auto
           '; }
-
           [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
-
           dump_boot;
           write_boot;
           EOF
 
-          cp workdir/patched_boot.img anykernel3/boot.img
-
-          cd anykernel3
+          cp workdir_xos/patched_boot_xos.img xos_ak3/boot.img
+          cd xos_ak3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          ZIP_NAME="InfinixZero5G2023-Option3-BPF-Boot.zip"
-          zip -r9 "../$ZIP_NAME" . -x ".git/*"
+          zip -r9 "../FOR_XOS14_Infinix_BPF_Boot.zip" . -x ".git/*"
 
-      - name: Upload Repacked boot.img File
+      - name: Upload XOS 14 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Option3-BPF-boot.img
-          path: workdir/patched_boot.img
+          name: FOR_XOS14_Infinix_BPF_Boot
+          path: FOR_XOS14_Infinix_BPF_Boot.zip
 
-      - name: Upload Flashable AnyKernel3 Zip
+  build-coloros16-boot:
+    name: Build ColorOS A16 BPF Boot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl zip unzip cpio python3
+
+      - name: Process ColorOS ROM or Prebuilt Image
+        run: |
+          mkdir -p workdir_cos
+          
+          # If user provided ColorOS ROM Zip URL
+          ROM_URL="${{ github.event.inputs.coloros_rom_url }}"
+          
+          if [ -n "$ROM_URL" ]; then
+            echo "Downloading ColorOS ROM Zip from: $ROM_URL"
+            wget -O coloros_rom.zip "$ROM_URL"
+            unzip -j coloros_rom.zip "boot.img" -d workdir_cos/ || true
+          fi
+
+          # Fallback to Stock Kernel + A16 Ramdisk Mode if no direct ROM URL
+          if [ ! -f "workdir_cos/boot.img" ]; then
+            echo "Fallback: Using MediaFire Extracted Container for ColorOS Patch"
+            MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
+            DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
+            wget -O workdir_cos/boot_contents.zip "$DIRECT_URL"
+            cd workdir_cos && unzip -o boot_contents.zip && cd ..
+            find workdir_cos -mindepth 2 -type f -exec mv {} workdir_cos/ \; 2>/dev/null || true
+          fi
+
+      - name: Setup Magiskboot Tool
+        run: |
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir_cos/
+          mv workdir_cos/lib/x86_64/libmagiskboot.so workdir_cos/magiskboot
+          rm -rf workdir_cos/lib Magisk-v27.0.apk
+          chmod +x workdir_cos/magiskboot
+
+      - name: Patch ColorOS Boot with BPF Hooks
+        working-directory: workdir_cos
+        run: |
+          if [ -f "boot.img" ] && [ ! -f "ramdisk.cpio" ]; then
+            ./magiskboot unpack boot.img
+          fi
+
+          if [ -f "ramdisk.cpio" ]; then
+            cat > init.bpf.rc << 'EOF'
+          on early-init
+              mkdir /sys/fs/bpf 0770 root system
+              mount bpf bpf /sys/fs/bpf mode=0770,gid=1000
+
+          on boot
+              write /proc/sys/net/core/bpf_jit_enable 1
+              write /proc/sys/net/core/bpf_jit_harden 0
+              write /proc/sys/net/core/bpf_jit_kallsyms 1
+          EOF
+
+            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
+          fi
+
+          if [ -f "boot.img" ]; then
+            ./magiskboot repack boot.img patched_boot_cos.img
+          else
+            ./magiskboot repack kernel patched_boot_cos.img
+          fi
+
+      - name: Build ColorOS A16 AnyKernel3 Zip
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 cos_ak3
+          
+          cat > cos_ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Mod Script - ColorOS A16
+          properties() { '
+          kernel.string=Infinix Zero 5G 2023 - ColorOS A16 BPF Boot
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          block=auto
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          '; }
+          [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
+          dump_boot;
+          write_boot;
+          EOF
+
+          cp workdir_cos/patched_boot_cos.img cos_ak3/boot.img
+          cd cos_ak3
+          rm -rf .git README.md LICENSE .github 2>/dev/null || true
+          zip -r9 "../FOR_COLOROS16_Infinix_BPF_Boot.zip" . -x ".git/*"
+
+      - name: Upload ColorOS A16 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Option3-BPF-Flashable-Zip
-          path: InfinixZero5G2023-Option3-BPF-Boot.zip
+          name: FOR_COLOROS16_Infinix_BPF_Boot
+          path: FOR_COLOROS16_Infinix_BPF_Boot.zip
