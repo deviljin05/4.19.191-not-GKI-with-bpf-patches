@@ -1,9 +1,9 @@
-name: Patch Original Boot.img (Kernel Binary BPF Patching)
+name: Unzip Extracted Boot & Apply BPF Patches
 on:
   workflow_dispatch: {}
 
 jobs:
-  patch-boot:
+  repack-boot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
@@ -13,28 +13,32 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
+          pip3 install gdown
 
-      - name: Create Work Directory & Setup Boot Image
+      - name: Create Work Directory & Download Zip
         run: |
           mkdir -p workdir
-          
-          # UPDATE THIS LINK: Stock boot.img ka Direct Download Link (ya repo root mein boot.img rakhein)
-          BOOT_URL="https://example.com/path/to/original/boot.img"
-          
-          if [ -f "boot.img" ]; then
-            echo "boot.img found in repository root!"
-            cp boot.img workdir/
-          else
-            echo "Downloading stock boot.img..."
-            wget -O workdir/boot.img "$BOOT_URL" || true
-          fi
+          echo "Downloading zip file from Google Drive..."
+          gdown --id "1eZ2keU1kRgG64cgciC9V-808RBP2iYoc" -O workdir/boot_contents.zip || true
 
-          if [ ! -f "workdir/boot.img" ]; then
-            echo "ERROR: boot.img nahi mili! Repo root mein rakhein ya BOOT_URL update karein."
+          if [ ! -f "workdir/boot_contents.zip" ]; then
+            echo "ERROR: Google Drive se ZIP download nahi ho saki! Link permissions (Anyone with link) check karein."
             exit 1
           fi
 
-      - name: Setup Unpack Tools
+      - name: Extract Zip Contents
+        working-directory: workdir
+        run: |
+          echo "Unzipping uploaded archive..."
+          unzip -o boot_contents.zip
+          
+          # Nested folders handling
+          find . -mindepth 2 -type f -exec mv {} . \; 2>/dev/null || true
+          
+          echo "Extracted directory contents:"
+          ls -la
+
+      - name: Setup Repack Tool (magiskboot)
         run: |
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d workdir/
@@ -42,33 +46,20 @@ jobs:
           rm -rf workdir/lib Magisk-v27.0.apk
           chmod +x workdir/magiskboot
 
-      - name: Unpack Stock Boot Image & Extract Kernel Binary
+      - name: Unpack boot.img (If present as image file)
         working-directory: workdir
         run: |
-          ./magiskboot unpack boot.img
-          if [ ! -f "kernel" ]; then
-            echo "ERROR: Kernel binary extract nahi hua!"
-            exit 1
+          if [ -f "boot.img" ] && [ ! -f "ramdisk.cpio" ]; then
+            echo "Unpacking boot.img file..."
+            ./magiskboot unpack boot.img
           fi
-          echo "Kernel binary extracted successfully."
 
-      - name: Patch Kernel Binary & Ramdisk for BPF Configs
+      - name: Apply BPF Init Configurations to Ramdisk
         working-directory: workdir
         run: |
-          # Binary Hex-patching Kernel Image
-          python3 -c '
-          with open("kernel", "rb") as f:
-              data = bytearray(f.read())
-
-          if b"bpf_jit_enable" in data:
-              print("Found BPF JIT Symbols in Stock Kernel! Patching binary flags...")
-
-          with open("kernel", "wb") as f:
-              f.write(data)
-          '
-
-          # Add BPF Mount Points and Sysctl Configs in Ramdisk
-          cat > init.bpf.rc << 'EOF'
+          if [ -f "ramdisk.cpio" ]; then
+            echo "Injecting BPF startup rules into ramdisk.cpio..."
+            cat > init.bpf.rc << 'EOF'
           on early-init
               mkdir /sys/fs/bpf 0770 root system
               mount bpf bpf /sys/fs/bpf mode=0770,gid=1000
@@ -79,21 +70,29 @@ jobs:
               write /proc/sys/net/core/bpf_jit_kallsyms 1
           EOF
 
-          if [ -f "ramdisk.cpio" ]; then
             ./magiskboot cpio ramdisk.cpio \
               "add 0755 init.bpf.rc init.bpf.rc" \
               "patch"
+          else
+            echo "Warning: ramdisk.cpio nahi mili!"
           fi
 
-      - name: Repack Patched Kernel & Boot Image
+      - name: Repack Patched Boot Image
         working-directory: workdir
         run: |
-          ./magiskboot repack boot.img patched_boot.img
-          
-          if [ -f "patched_boot.img" ]; then
-            echo "Successfully repacked patched_boot.img with BPF configs!"
+          if [ -f "boot.img" ]; then
+            ./magiskboot repack boot.img patched_boot.img
           else
-            echo "ERROR: Boot image repacking failed!"
+            ./magiskboot repack kernel patched_boot.img
+          fi
+
+          if [ -f "patched_boot.img" ]; then
+            echo "Successfully repacked patched_boot.img!"
+          elif [ -f "new-boot.img" ]; then
+            mv new-boot.img patched_boot.img
+            echo "Successfully repacked patched_boot.img!"
+          else
+            echo "ERROR: Repack process fail ho gaya!"
             exit 1
           fi
 
@@ -103,10 +102,10 @@ jobs:
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## Infinix Zero 5G 2023 — BPF Patched Stock Boot (No Source Build / No Magisk)
+          ## Infinix Zero 5G 2023 — BPF Patched Boot (Repacked)
 
           properties() { '
-          kernel.string=Infinix Zero 5G 2023 Original Boot (BPF Binary Patched)
+          kernel.string=Infinix Zero 5G 2023 BPF Repacked Boot
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -131,7 +130,7 @@ jobs:
           ZIP_NAME="InfinixZero5G2023-BPF-Patched-Boot.zip"
           zip -r9 "../$ZIP_NAME" . -x ".git/*"
 
-      - name: Upload Patched boot.img File
+      - name: Upload Repacked boot.img File
         uses: actions/upload-artifact@v4
         with:
           name: BPF-Patched-boot.img
