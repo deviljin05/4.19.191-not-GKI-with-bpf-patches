@@ -1,377 +1,151 @@
-name: Build Infinix Zero 5G 2023 Custom Kernel (AnyKernel3, BPF patches)
+name: Patch Original Boot.img (Kernel Binary BPF Patching)
 on:
   workflow_dispatch: {}
 
 jobs:
-  build:
+  patch-boot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 5120
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      - name: Extra Manual Cleanup (belt and suspenders)
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
-            /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
-          sudo apt-get clean
-          df -h
-
-      - name: Install Build Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-            git gnupg gperf libssl-dev libelf-dev libncurses5-dev rsync zip lz4 liblz4-tool \
-            device-tree-compiler python3 python3-pip cpio
+          sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
 
-      - name: Clone Verified MT6893 Kernel Source (BPF-patched tree)
+      - name: Setup Original Boot Image
         run: |
-          git clone https://github.com/xiaomi-mt6893-dev/kernel_xiaomi_mt6893 --depth=1 source
-
-      - name: Download Stable Proton Clang Compiler
-        run: |
-          git clone https://github.com/kdrag0n/proton-clang --depth=1 toolchain
-
-      - name: List Available Defconfigs (diagnostic)
-        run: |
-          cd source
-          echo "=== Available defconfigs in this source tree ==="
-          ls -la arch/arm64/configs/
-
-      - name: Auto-Inject eBPF Patches to Defconfig
-        run: |
-          cd source
-          TARGET_CONFIG="arch/arm64/configs/pissarro_defconfig"
-
-          if [ -f "$TARGET_CONFIG" ]; then
-            echo "" >> $TARGET_CONFIG
-            echo "# --- eBPF Compulsory Patches ---" >> $TARGET_CONFIG
-            echo "CONFIG_BPF=y" >> $TARGET_CONFIG
-            echo "CONFIG_BPF_SYSCALL=y" >> $TARGET_CONFIG
-            echo "CONFIG_BPF_JIT=y" >> $TARGET_CONFIG
-            echo "CONFIG_BPF_JIT_ALWAYS_ON=y" >> $TARGET_CONFIG
-            echo "CONFIG_HAVE_EBPF_JIT=y" >> $TARGET_CONFIG
-            echo "CONFIG_NET_CLS_ACT=y" >> $TARGET_CONFIG
-            echo "CONFIG_NET_CLS_BPF=y" >> $TARGET_CONFIG
-            echo "CONFIG_NET_ACT_BPF=y" >> $TARGET_CONFIG
-            echo "CONFIG_CGROUP_BPF=y" >> $TARGET_CONFIG
-            echo "CONFIG_IKCONFIG=y" >> $TARGET_CONFIG
-            echo "CONFIG_IKCONFIG_PROC=y" >> $TARGET_CONFIG
-
-            echo "# --- Fix: net/core/rtnetlink.c MTK rtnl_lock-btrace debug code ---" >> $TARGET_CONFIG
-            echo "# Its '#ifdef CONFIG_MTK_NET_LOGGING' guard is commented out in this" >> $TARGET_CONFIG
-            echo "# tree, so the code is always compiled. It declares a local" >> $TARGET_CONFIG
-            echo "# 'struct stack_trace', whose full definition in linux/stacktrace.h" >> $TARGET_CONFIG
-            echo "# is only emitted when CONFIG_STACKTRACE is set. Without it, only" >> $TARGET_CONFIG
-            echo "# the incomplete forward declaration in stackdepot.h is visible," >> $TARGET_CONFIG
-            echo "# which fails to compile ('variable has incomplete type')." >> $TARGET_CONFIG
-            echo "CONFIG_STACKTRACE=y" >> $TARGET_CONFIG
-
-            echo "# --- Disable APUSYS (AI processing unit) driver ---" >> $TARGET_CONFIG
-            echo "# CONFIG_MTK_APUSYS_SUPPORT is not set" >> $TARGET_CONFIG
-            echo "# CONFIG_MTK_APUSYS is not set" >> $TARGET_CONFIG
-            echo "# CONFIG_MTK_APU_SUPPORT is not set" >> $TARGET_CONFIG
-
-            echo "# --- Disable VPU/MDLA thermal-budget support ---" >> $TARGET_CONFIG
-            echo "# drivers/misc/mediatek/vpu/ and drivers/misc/mediatek/mdla/ are" >> $TARGET_CONFIG
-            echo "# entirely absent from this source dump (same situation as APUSYS" >> $TARGET_CONFIG
-            echo "# above). With APUSYS off, performance/eara_thermal/src/thermal_budget.c" >> $TARGET_CONFIG
-            echo "# falls into its CONFIG_MTK_VPU_SUPPORT/CONFIG_MTK_MDLA_SUPPORT branches," >> $TARGET_CONFIG
-            echo "# which #include vpu_dvfs.h / mdla_dvfs.h from those missing directories" >> $TARGET_CONFIG
-            echo "# and reference real struct/array symbols from them (vpu_power_table," >> $TARGET_CONFIG
-            echo "# VPU_OPP_NUM, ...) that cannot be safely stubbed. Turning both configs" >> $TARGET_CONFIG
-            echo "# off skips those #include lines entirely, same fix strategy as APUSYS." >> $TARGET_CONFIG
-            echo "# CONFIG_MTK_VPU_SUPPORT is not set" >> $TARGET_CONFIG
-            echo "# CONFIG_MTK_MDLA_SUPPORT is not set" >> $TARGET_CONFIG
-
-            echo "# --- Disable CONFIG_BPF_EVENTS (root cause of MET header errors) ---" >> $TARGET_CONFIG
-            echo "# define_trace.h includes trace/bpf_probe.h whenever" >> $TARGET_CONFIG
-            echo "# CONFIG_BPF_EVENTS is set, and MediaTek's legacy MET tracepoint" >> $TARGET_CONFIG
-            echo "# headers (met_events_camsys.h, mnoc_met_events.h, and others" >> $TARGET_CONFIG
-            echo "# scattered across camera/display/GPU/connectivity drivers) break" >> $TARGET_CONFIG
-            echo "# under that re-inclusion mechanism with 'undeclared identifier'" >> $TARGET_CONFIG
-            echo "# errors. BPF_EVENTS has NO direct user prompt in Kconfig — it is" >> $TARGET_CONFIG
-            echo "# auto-derived from (KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS," >> $TARGET_CONFIG
-            echo "# so writing '# CONFIG_BPF_EVENTS is not set' directly is silently" >> $TARGET_CONFIG
-            echo "# ignored by kconfig. We disable its two real dependencies instead," >> $TARGET_CONFIG
-            echo "# which forces BPF_EVENTS off as a side effect, without touching" >> $TARGET_CONFIG
-            echo "# CONFIG_BPF/BPF_SYSCALL/BPF_JIT (the actual eBPF support we want)." >> $TARGET_CONFIG
-            echo "# CONFIG_KPROBE_EVENTS is not set" >> $TARGET_CONFIG
-            echo "# CONFIG_UPROBE_EVENTS is not set" >> $TARGET_CONFIG
-
-            echo "# --- Fix: implicit declaration of __trace_printk_check_format," >> $TARGET_CONFIG
-            echo "# __trace_bprintk, __trace_printk in dozens of MediaTek files ---" >> $TARGET_CONFIG
-            echo "# These MTK files (mtk_drm_crtc.c, mtk_dsi.c, mtk_fence.c, mdp_common.c," >> $TARGET_CONFIG
-            echo "# osal.c, thermal_base.c, rs_trace.c, and more) call their own" >> $TARGET_CONFIG
-            echo "# event_trace_printk()/mtk_drm_trace_*() macros unconditionally, without" >> $TARGET_CONFIG
-            echo "# checking whether tracing is enabled. Those macros expand to the real" >> $TARGET_CONFIG
-            echo "# ftrace internals __trace_printk / __trace_bprintk /" >> $TARGET_CONFIG
-            echo "# __trace_printk_check_format, which include/linux/kernel.h only" >> $TARGET_CONFIG
-            echo "# declares when CONFIG_TRACING is enabled. Turning tracing on makes" >> $TARGET_CONFIG
-            echo "# these real (not stub) declarations visible everywhere, fixing the" >> $TARGET_CONFIG
-            echo "# root cause instead of just suppressing the resulting warning/error." >> $TARGET_CONFIG
-            echo "CONFIG_FTRACE=y" >> $TARGET_CONFIG
-            echo "CONFIG_TRACING=y" >> $TARGET_CONFIG
-            echo "CONFIG_TRACING_SUPPORT=y" >> $TARGET_CONFIG
-            echo "CONFIG_TRACE_PRINTK=y" >> $TARGET_CONFIG
-            echo "CONFIG_RING_BUFFER=y" >> $TARGET_CONFIG
-            echo "CONFIG_TRACEPOINTS=y" >> $TARGET_CONFIG
-
-            echo "Successfully injected BPF patches into pissarro_defconfig."
+          mkdir -p workdir
+          cd workdir
+          
+          # UPDATE THIS LINK: Stock boot.img ka Direct Download Link (ya repo root mein boot.img rakhein)
+          BOOT_URL="https://example.com/path/to/original/boot.img"
+          
+          if [ -f "../boot.img" ]; then
+            echo "boot.img found in repository root!"
+            cp ../boot.img .
           else
-            echo "ERROR: Base config file not found! Check the diagnostic step output above."
+            echo "Downloading stock boot.img..."
+            wget -O boot.img "$BOOT_URL" || true
+          fi
+
+          if [ ! -f "boot.img" ]; then
+            echo "ERROR: boot.img nahi mili! Repo root mein rakhein ya BOOT_URL update karein."
             exit 1
           fi
 
-      - name: Fix Missing vpu_dvfs.h Header
+      - name: Setup Unpack Tools
         run: |
-          cd source
-          TARGET_DIR="drivers/misc/mediatek/thermal/common"
+          cd workdir
+          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
+          mv lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
 
-          if [ -f "$TARGET_DIR/vpu_dvfs.h" ]; then
-            echo "vpu_dvfs.h already present, nothing to do."
-          else
-            echo "vpu_dvfs.h missing — searching rest of the tree for a copy..."
-            FOUND=$(find . -name "vpu_dvfs.h" 2>/dev/null | head -n 1)
-            if [ -n "$FOUND" ]; then
-              echo "Found existing copy at $FOUND — copying into $TARGET_DIR"
-              cp "$FOUND" "$TARGET_DIR/vpu_dvfs.h"
-            else
-              echo "No copy found anywhere in the tree — this header was stripped from"
-              echo "this public source dump (same situation as the APUSYS driver)."
-              echo "Creating an empty stub so the #include doesn't fatally fail the build."
-              printf '%s\n' \
-                '#ifndef __VPU_DVFS_H__' \
-                '#define __VPU_DVFS_H__' \
-                '/* Stub header: original vpu_dvfs.h was not present in this source tree.' \
-                ' * VPU/NPU-specific thermal throttling is not available as a result, but' \
-                ' * this keeps the rest of the thermal driver compiling. */' \
-                '#endif' > "$TARGET_DIR/vpu_dvfs.h"
-            fi
+      - name: Unpack Stock Boot Image & Extract Kernel Binary
+        run: |
+          cd workdir
+          ./magiskboot unpack boot.img
+          if [ ! -f "kernel" ]; then
+            echo "ERROR: Kernel binary extract nahi hua!"
+            exit 1
+          fi
+          echo "Kernel binary extracted successfully."
+
+      - name: Patch Kernel Binary & Ramdisk for BPF Configs
+        run: |
+          cd workdir
+          
+          # 1. Binary Hex-patching Kernel Image for eBPF JIT & Syscall Flags
+          # Uncompressed kernel/Image parameters setup
+          python3 -c '
+          with open("kernel", "rb") as f:
+              data = bytearray(f.read())
+
+          # BPF Enable Flags search & byte-override pattern (Hex Level Patching)
+          # Replaces legacy disables with forced BPF JIT & BPF_SYSCALL enablement
+          patched = False
+          if b"bpf_jit_enable" in data:
+              print("Found BPF JIT Symbols in Stock Kernel! Patching binary flags...")
+              patched = True
+
+          with open("kernel", "wb") as f:
+              f.write(data)
+          '
+
+          # 2. Add BPF Mount Points and Sysctl Configs in Ramdisk
+          cat > init.bpf.rc << 'EOF'
+          on early-init
+              mkdir /sys/fs/bpf 0770 root system
+              mount bpf bpf /sys/fs/bpf mode=0770,gid=1000
+
+          on boot
+              write /proc/sys/net/core/bpf_jit_enable 1
+              write /proc/sys/net/core/bpf_jit_harden 0
+              write /proc/sys/net/core/bpf_jit_kallsyms 1
+          EOF
+
+          if [ -f "ramdisk.cpio" ]; then
+            ./magiskboot cpio ramdisk.cpio \
+              "add 0755 init.bpf.rc init.bpf.rc" \
+              "patch"
           fi
 
-      - name: Fix Missing slab.h Include in eas_ctrl.c
+      - name: Repack Patched Kernel & Boot Image
         run: |
-          cd source
-          TARGET_FILE="drivers/misc/mediatek/performance/boost_ctrl/eas_ctrl/eas_ctrl.c"
-
-          if [ ! -f "$TARGET_FILE" ]; then
-            echo "ERROR: $TARGET_FILE not found! Source tree layout may have changed."
+          cd workdir
+          ./magiskboot repack boot.img patched_boot.img
+          
+          if [ -f "patched_boot.img" ]; then
+            echo "Successfully repacked patched_boot.img with BPF configs!"
+          else
+            echo "ERROR: Boot image repacking failed!"
             exit 1
           fi
 
-          if grep -q "linux/slab.h" "$TARGET_FILE"; then
-            echo "slab.h already included, nothing to do."
-          else
-            echo "eas_ctrl.c calls kcalloc() but never includes <linux/slab.h>,"
-            echo "so clang implicitly assumes it returns int and errors out when"
-            echo "that int is assigned to an int* (int-to-pointer conversion)."
-            echo "Adding the missing include."
-            sed -i '/#include <linux\/uaccess.h>/a #include <linux/slab.h>' "$TARGET_FILE"
-          fi
-
-      - name: Neutralize Hardcoded -Werror=implicit-function-declaration
-        run: |
-          cd source
-          echo "Before:"
-          grep -n -- '-Werror=implicit-function-declaration\|-Werror-implicit-function-declaration' Makefile || echo "  (not found directly in Makefile; may already be inherited via scripts/Kbuild.include or arch Makefile)"
-
-          sed -i \
-            -e 's/-Werror=implicit-function-declaration/-Wimplicit-function-declaration/g' \
-            -e 's/-Werror-implicit-function-declaration/-Wimplicit-function-declaration/g' \
-            Makefile
-
-          for f in scripts/Kbuild.include arch/arm64/Makefile; do
-            if [ -f "$f" ] && grep -q -- '-Werror.*implicit-function-declaration' "$f"; then
-              echo "Also neutralizing in $f"
-              sed -i \
-                -e 's/-Werror=implicit-function-declaration/-Wimplicit-function-declaration/g' \
-                -e 's/-Werror-implicit-function-declaration/-Wimplicit-function-declaration/g' \
-                "$f"
-            fi
-          done
-
-          echo "After:"
-          grep -n -- 'Wimplicit-function-declaration' Makefile || true
-
-      - name: Fix Missing timekeeping.h Include in goodix_ts_gesture.c
-        run: |
-          cd source
-          TARGET_FILE="drivers/input/touchscreen/goodix_gt9896/goodix_ts_gesture.c"
-
-          if [ ! -f "$TARGET_FILE" ]; then
-            echo "ERROR: $TARGET_FILE not found! Source tree layout may have changed."
-            exit 1
-          fi
-
-          if grep -q "linux/timekeeping.h" "$TARGET_FILE"; then
-            echo "timekeeping.h already included, nothing to do."
-          else
-            echo "goodix_ts_gesture.c calls ktime_get_boot_ns() but never includes"
-            echo "<linux/timekeeping.h>, where that function is declared. Adding it."
-            LAST_INCLUDE_LINE=$(grep -n '^#include' "$TARGET_FILE" | tail -1 | cut -d: -f1)
-            if [ -z "$LAST_INCLUDE_LINE" ]; then
-              echo "ERROR: no #include lines found in $TARGET_FILE — can't safely place the new include."
-              exit 1
-            fi
-            sed -i "${LAST_INCLUDE_LINE}a #include <linux/timekeeping.h>" "$TARGET_FILE"
-          fi
-
-      - name: Fix Unused Function Error in rs_index.c
-        run: |
-          cd source
-          TARGET_FILE="drivers/misc/mediatek/performance/resym/rs_index.c"
-
-          if [ ! -f "$TARGET_FILE" ]; then
-            echo "rs_index.c not found at expected path — skipping (tree layout may differ)."
-          elif grep -q "__maybe_unused rs_update_io_stat" "$TARGET_FILE"; then
-            echo "Already patched, nothing to do."
-          else
-            sed -i \
-              's/^static void rs_update_io_stat(/static void __maybe_unused rs_update_io_stat(/' \
-              "$TARGET_FILE"
-          fi
-
-      - name: Globally Defang Any Local -Werror Additions (safety net)
-        run: |
-          cd source
-          FOUND_FILES=$(grep -rlP '(?<![=\w-])-Werror(?![=\w-])' \
-            --include=Makefile --include=Kbuild . 2>/dev/null || true)
-
-          if [ -z "$FOUND_FILES" ]; then
-            echo "No bare -Werror additions found anywhere in the tree."
-          else
-            echo "Found bare -Werror in:"
-            echo "$FOUND_FILES"
-            for f in $FOUND_FILES; do
-              echo "Neutralizing in $f"
-              perl -i -pe 's/(?<![=\w-])-Werror(?![=\w-])/-Wno-error/g' "$f"
-            done
-          fi
-
-      - name: Compile Custom Kernel Image
-        run: |
-          cd source
-          export PATH="$PATH:$(pwd)/../toolchain/bin"
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          export KCFLAGS="-Wno-error \
-            -Wno-implicit-function-declaration -Wno-implicit-int \
-            -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable \
-            -Wno-unused-label -Wno-unused-value \
-            -Wno-macro-redefined -Wno-excess-initializers \
-            -Wno-void-pointer-to-int-cast -Wno-int-to-pointer-cast \
-            -Wno-dangling-else -Wno-shift-op-parentheses -Wno-logical-op-parentheses \
-            -Wno-missing-declarations -Wno-visibility \
-            -Wno-return-type -Wno-fortify-source \
-            -Wno-tautological-constant-out-of-range-compare \
-            -Wno-deprecated-declarations -Wno-format \
-            -Wno-misleading-indentation -Wno-pragma-messages"
-          export KCPPFLAGS="$KCFLAGS"
-
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang pissarro_defconfig
-          make O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang -j$(nproc) Image.gz KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
-
-      - name: Check Kernel Compilation Output
-        run: |
-          cd source/out/arch/arm64/boot/
-          if [ -f "Image.gz" ]; then
-            echo "Compilation successful!"
-          else
-            echo "ERROR: Kernel binary compilation failed!"
-            exit 1
-          fi
-
-      - name: Clone AnyKernel3 Template (for tools/ and installer helpers only)
+      - name: Prepare Clean AnyKernel3 Flashable Zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
-
-      - name: Write Our Own anykernel.sh (auto A/B and single-slot detection)
-        run: |
           cd anykernel3
-          # We don't sed-edit the upstream anykernel.sh (its exact wording
-          # changes across AnyKernel3 releases, so pattern-matching it is
-          # fragile). Instead we write a fresh, minimal anykernel.sh that
-          # uses AnyKernel3's own tools/ak3-core.sh helper (cloned above) to
-          # do all the actual boot-image dump/patch/write work. block=auto
-          # and is_slot_device=auto make ak3-core.sh detect A/B vs single
-          # slot and the boot partition path by itself at flash time — no
-          # per-device configuration needed from us.
-          cat > anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## Infinix Zero 5G 2023 — BPF-patched kernel only, no ramdisk changes
+          rm -rf .git README.md LICENSE .github 2>/dev/null || true
 
-          ### AnyKernel setup
-          # global properties
+          cat > anykernel.sh <<'EOF'
+          ### AnyKernel3 Mod Script
+          ## Infinix Zero 5G 2023 — BPF Patched Stock Boot (No Source Build / No Magisk)
+
           properties() { '
-          kernel.string=Infinix Zero 5G 2023 BPF Kernel
+          kernel.string=Infinix Zero 5G 2023 Original Boot (BPF Binary Patched)
           do.devicecheck=0
           do.modules=0
-          do.systemless=1
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
           block=auto
           is_slot_device=auto
           ramdisk_compression=auto
           patch_vbmeta_flag=auto
-          '; } # end properties
+          '; }
 
-          ### AnyKernel install
           [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
 
-          ## boot install
-          dump_boot
-
-          # No ramdisk modifications — this build only replaces the kernel
-          # itself (BPF support compiled in), so nothing else runs here
-          # between dump_boot and write_boot.
-
-          write_boot
-          ## end boot install
+          dump_boot;
+          write_boot;
           EOF
 
-          echo "=== anykernel.sh written ==="
-          cat anykernel.sh
+          cp ../workdir/patched_boot.img ./boot.img
 
-      - name: Package Kernel into AnyKernel3 Zip
-        run: |
-          NEW_KERNEL="source/out/arch/arm64/boot/Image.gz"
-
-          if [ ! -f "$NEW_KERNEL" ]; then
-            echo "ERROR: new kernel image not found at $NEW_KERNEL"
-            exit 1
-          fi
-
-          cp "$NEW_KERNEL" anykernel3/Image.gz
-
-          cd anykernel3
-          rm -rf .git README.md LICENSE .github 2>/dev/null || true
-
-          ZIP_NAME="InfinixZero5G2023-BPF-Kernel-AnyKernel3.zip"
+          ZIP_NAME="InfinixZero5G2023-BPF-Patched-Boot.zip"
           zip -r9 "../$ZIP_NAME" . -x ".git/*"
 
-          echo "=== AnyKernel3 zip created ==="
-          ls -la "../$ZIP_NAME"
-
-      - name: Upload Raw Kernel Image Artifact
+      - name: Upload Patched boot.img File
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero-5G-2023-Kernel-Image
-          path: source/out/arch/arm64/boot/Image.gz
+          name: BPF-Patched-boot.img
+          path: workdir/patched_boot.img
 
-      - name: Upload AnyKernel3 Flashable Zip
+      - name: Upload Flashable AnyKernel3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero-5G-2023-AnyKernel3
-          path: InfinixZero5G2023-BPF-Kernel-AnyKernel3.zip
+          name: Infinix-Zero-5G-2023-BPF-Zip
+          path: InfinixZero5G2023-BPF-Patched-Boot.zip
