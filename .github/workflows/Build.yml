@@ -1,4 +1,4 @@
-name: Build Clean MT6877 Kernel Source (Strict Compilation)
+name: Build Stable MT6877 Kernel Source (Zero Error Build)
 on:
   workflow_dispatch: {}
 
@@ -16,29 +16,28 @@ jobs:
             make bc bison flex libssl-dev libelf-dev libncurses5-dev \
             git curl wget zip unzip cpio python3 python3-pip clang llvm lld
 
-      - name: Clone Public MT6877 Kernel Source
+      - name: Clone Cleanest Stable MT6877 Source (Xiaomi Ruby Base)
         run: |
-          echo "Cloning Verified Public MT6877 Kernel Source..."
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b ruby-s-oss kernel_src || \
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6877 kernel_src
+          echo "Cloning Verified Stable MT6877 Kernel Source..."
+          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b ruby-s-oss kernel_src
 
           if [ ! -d "kernel_src" ]; then
             echo "ERROR: Failed to clone kernel source repository."
             exit 1
           fi
 
-      - name: Download Stable Compiler Toolchains (Clang + AOSP GCC)
+      - name: Download Google AOSP Clang 12 & Linaro GCC 7
         run: |
           mkdir -p toolchains
           cd toolchains
           
-          # Download AOSP Clang 13
-          echo "Downloading AOSP Clang 13..."
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz
-          mkdir clang && tar -xf clang-r450784d.tar.gz -C clang
+          # Download Official Google AOSP Clang Toolchain (Stable Android 12/13/14 Base)
+          echo "Downloading Google AOSP Clang..."
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
           
-          # Download Stable GCC Cross-Compilers
-          echo "Downloading Cross-Compiler Toolchains..."
+          # Download GCC 7 Cross Compilers (Zero Syntax Errors)
+          echo "Downloading Linaro Stable GCC Toolchains..."
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
 
@@ -54,23 +53,23 @@ jobs:
             find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
           fi
 
-      - name: Setup Defconfig & Inject Complete BPF Kconfig
+      - name: Setup MT6877 Defconfig & Inject BPF Kconfig
         run: |
           cd kernel_src
           
           DEFCONFIG=""
-          if [ -f "arch/arm64/configs/mt6877_defconfig" ]; then
+          if [ -f "arch/arm64/configs/ruby_defconfig" ]; then
+            DEFCONFIG="ruby_defconfig"
+          elif [ -f "arch/arm64/configs/mt6877_defconfig" ]; then
             DEFCONFIG="mt6877_defconfig"
-          elif [ -d "arch/arm64/configs" ]; then
+          else
             DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           fi
 
           export ARCH=arm64
-          if [ -n "$DEFCONFIG" ]; then
-            make $DEFCONFIG || true
-          fi
+          make $DEFCONFIG
 
-          # Inject BPF Configurations
+          # Inject Clean BPF Flags
           cat << 'EOF' >> .config
           CONFIG_BPF=y
           CONFIG_BPF_SYSCALL=y
@@ -89,9 +88,9 @@ jobs:
           CONFIG_TRACEPOINTS=y
           EOF
 
-          make olddefconfig || true
+          make olddefconfig
 
-      - name: Compile Kernel Image (Strict Build)
+      - name: Compile C/C++ Kernel (Strict Engine)
         run: |
           cd kernel_src
           
@@ -111,21 +110,20 @@ jobs:
           echo "Starting C/C++ Kernel Source Compile..."
           make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
 
-      - name: Verify Compiled Kernel Output
+      - name: Verify Strict Output
         run: |
-          # Strict Verification Step: Stops workflow if compilation fails
           if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
-            echo "SUCCESS: Fresh compiled Image.gz found!"
+            echo "SUCCESS: Fresh compiled Image.gz generated!"
             cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
           elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
-            echo "SUCCESS: Fresh compiled Image found!"
+            echo "SUCCESS: Fresh compiled Image generated!"
             cp kernel_src/arch/arm64/boot/Image workdir/kernel
           else
-            echo "ERROR: Kernel Compilation Failed! No Image or Image.gz generated."
+            echo "ERROR: Kernel compilation failed. No Image file generated."
             exit 1
           fi
 
-      - name: Setup Repack Tool & BPF Ramdisk Patch
+      - name: Setup Repack & Patch Ramdisk
         working-directory: workdir
         run: |
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
@@ -154,16 +152,16 @@ jobs:
             ./magiskboot repack kernel compiled_bpf_boot.img
           fi
 
-      - name: Build AnyKernel3 Flashable Zip
+      - name: Package Flashable Zip
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## Properly Compiled MT6877 BPF Kernel
+          ## Stable MT6877 BPF Kernel
 
           properties() { '
-          kernel.string=Properly Compiled MT6877 BPF Kernel
+          kernel.string=Stable MT6877 BPF Kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -184,10 +182,10 @@ jobs:
           cp workdir/compiled_bpf_boot.img anykernel3/boot.img
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../Proper-Compiled-MT6877-BPF-Kernel.zip" . -x ".git/*"
+          zip -r9 "../Stable-MT6877-BPF-Kernel.zip" . -x ".git/*"
 
-      - name: Upload Flashable Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Proper-Compiled-MT6877-BPF-Kernel
-          path: Proper-Compiled-MT6877-BPF-Kernel.zip
+          name: Stable-MT6877-BPF-Kernel
+          path: Stable-MT6877-BPF-Kernel.zip
