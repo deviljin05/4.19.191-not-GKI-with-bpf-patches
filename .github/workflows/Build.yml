@@ -13,13 +13,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
-          pip3 install gdown
+          pip3 install --upgrade gdown
 
       - name: Create Work Directory & Download Zip
         run: |
           mkdir -p workdir
           echo "Downloading zip file from Google Drive..."
-          gdown --id "1eZ2keU1kRgG64cgciC9V-808RBP2iYoc" -O workdir/boot_contents.zip || true
+          gdown --fuzzy "https://drive.google.com/file/d/1eZ2keU1kRgG64cgciC9V-808RBP2iYoc/view?usp=sharing" -O workdir/boot_contents.zip || true
 
           if [ ! -f "workdir/boot_contents.zip" ]; then
             echo "ERROR: Google Drive se ZIP download nahi ho saki! Link permissions (Anyone with link) check karein."
@@ -32,7 +32,7 @@ jobs:
           echo "Unzipping uploaded archive..."
           unzip -o boot_contents.zip
           
-          # Nested folders handling
+          # Nested sub-folders handling
           find . -mindepth 2 -type f -exec mv {} . \; 2>/dev/null || true
           
           echo "Extracted directory contents:"
