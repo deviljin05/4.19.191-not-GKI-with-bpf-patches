@@ -13,16 +13,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget curl zip unzip cpio python3 python3-pip
-          pip3 install --upgrade gdown
 
-      - name: Create Work Directory & Download Zip
+      - name: Create Work Directory & Download Zip from MediaFire
         run: |
           mkdir -p workdir
-          echo "Downloading zip file from Google Drive..."
-          gdown --fuzzy "https://drive.google.com/file/d/1eZ2keU1kRgG64cgciC9V-808RBP2iYoc/view?usp=sharing" -O workdir/boot_contents.zip || true
+          echo "Downloading zip file from MediaFire..."
+          
+          # Direct MediaFire Download URL extraction
+          MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
+          DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
 
-          if [ ! -f "workdir/boot_contents.zip" ]; then
-            echo "ERROR: Google Drive se ZIP download nahi ho saki! Link permissions (Anyone with link) check karein."
+          if [ -z "$DIRECT_URL" ]; then
+            echo "ERROR: MediaFire se direct download link scan nahi ho saka!"
+            exit 1
+          fi
+
+          wget -O workdir/boot_contents.zip "$DIRECT_URL"
+
+          if [ ! -f "workdir/boot_contents.zip" ] || [ ! -s "workdir/boot_contents.zip" ]; then
+            echo "ERROR: MediaFire file download fail ho gayi!"
             exit 1
           fi
 
@@ -32,7 +41,7 @@ jobs:
           echo "Unzipping uploaded archive..."
           unzip -o boot_contents.zip
           
-          # Nested sub-folders handling
+          # Nested sub-folders handling (saari files ko root workdir me lane ke liye)
           find . -mindepth 2 -type f -exec mv {} . \; 2>/dev/null || true
           
           echo "Extracted directory contents:"
