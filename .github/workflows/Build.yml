@@ -1,4 +1,4 @@
-name: Build Clean MT6877 Kernel (LLVM/Clang Engine)
+name: Official Xiaomi MT6877 Native Kernel Build
 on:
   workflow_dispatch: {}
 
@@ -16,43 +16,29 @@ jobs:
             make bc bison flex libssl-dev libelf-dev libncurses5-dev \
             git curl wget zip unzip cpio python3 python3-pip clang llvm lld
 
-      - name: Clone Verified MT6877 Kernel Source
+      - name: Clone Xiaomi MT6877 Official Kernel Source
         run: |
-          echo "Cloning Verified Public MT6877 Kernel Source..."
           GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b ruby-s-oss kernel_src
 
-          if [ ! -d "kernel_src" ]; then
-            echo "ERROR: Failed to clone kernel source repository."
-            exit 1
-          fi
-
-      - name: Download Google AOSP Clang Toolchain
+      - name: Download Official Xiaomi-Targeted Toolchains
         run: |
           mkdir -p toolchains
           cd toolchains
           
-          # Download Standalone AOSP Clang 13 (Built-in LLVM Utilities)
-          echo "Downloading Google AOSP Clang..."
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz
-          mkdir clang && tar -xf clang-r450784d.tar.gz -C clang
+          # 1. Official Android Clang r416183b (Exact version used for Android 12 MT6877 Kernels)
+          echo "Downloading Official AOSP Clang r416183b..."
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+          mkdir clang && tar -xf clang-r416183b.tar.gz -C clang
           
-          # Cross-Compile Binaries
+          # 2. Official AArch64 GCC 4.9 Cross-Compiler
+          echo "Downloading GCC 64-bit..."
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          
+          # 3. Official ARM32 GCC 4.9 Cross-Compiler
+          echo "Downloading GCC 32-bit..."
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
 
-      - name: Download Infinix Stock Base (MediaFire)
-        run: |
-          mkdir -p workdir
-          MEDIAFIRE_LINK="https://www.mediafire.com/file/oxhztcwpbqnqplq/all+things+here.zip/file"
-          DIRECT_URL=$(curl -s "$MEDIAFIRE_LINK" | grep -o 'https://download[^"]*' | head -n 1)
-
-          if [ -n "$DIRECT_URL" ]; then
-            wget -O workdir/boot_contents.zip "$DIRECT_URL"
-            cd workdir && unzip -o boot_contents.zip && cd ..
-            find workdir -mindepth 2 -type f -exec mv {} workdir/ \; 2>/dev/null || true
-          fi
-
-      - name: Setup Defconfig & Inject BPF Kconfig
+      - name: Setup Stock Defconfig & Pure BPF Flags
         run: |
           cd kernel_src
           
@@ -68,7 +54,7 @@ jobs:
           export ARCH=arm64
           make $DEFCONFIG
 
-          # Inject Clean BPF Flags
+          # Standard BPF Configuration (Without touching kernel C code)
           cat << 'EOF' >> .config
           CONFIG_BPF=y
           CONFIG_BPF_SYSCALL=y
@@ -89,7 +75,7 @@ jobs:
 
           make olddefconfig
 
-      - name: Compile C/C++ Kernel Image (LLVM/Clang Strict Mode)
+      - name: Compile Kernel (Official Clang + GCC Assembly Pipeline)
         run: |
           cd kernel_src
           
@@ -102,59 +88,26 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          export LLVM=1
-          export LLVM_IAS=1
 
-          echo "Starting C/C++ Kernel Source Compile with LLVM/Clang..."
+          # Pure compilation using Xiaomi's exact environment flags
           make -j$(nproc --all) Image.gz || make -j$(nproc --all) Image
 
-      - name: Verify Strict Output (Build Guard)
+      - name: Verify Compiled Output
         run: |
           if [ -f "kernel_src/arch/arm64/boot/Image.gz" ]; then
-            echo "SUCCESS: Fresh compiled Image.gz generated!"
+            echo "SUCCESS: Pure Image.gz compiled successfully!"
+            mkdir -p workdir
             cp kernel_src/arch/arm64/boot/Image.gz workdir/kernel
           elif [ -f "kernel_src/arch/arm64/boot/Image" ]; then
-            echo "SUCCESS: Fresh compiled Image generated!"
+            echo "SUCCESS: Pure Image compiled successfully!"
+            mkdir -p workdir
             cp kernel_src/arch/arm64/boot/Image workdir/kernel
           else
-            echo "ERROR: Kernel compilation failed. No Image generated."
+            echo "ERROR: Kernel compilation failed. Check build logs."
             exit 1
-          fi
-
-      - name: Repack Boot & Apply BPF Hooks
-        working-directory: workdir
-        run: |
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d ./
-          mv lib/x86_64/libmagiskboot.so ./magiskboot
-          rm -rf lib Magisk-v27.0.apk
-          chmod +x magiskboot
-
-          if [ -f "ramdisk.cpio" ]; then
-            cat > init.bpf.rc << 'EOF'
-          on early-init
-              mkdir /sys/fs/bpf 0770 root system
-              mount bpf bpf /sys/fs/bpf mode=0770,gid=1000
-
-          on boot
-              write /proc/sys/net/core/bpf_jit_enable 1
-              write /proc/sys/net/core/bpf_jit_harden 0
-              write /proc/sys/net/core/bpf_jit_kallsyms 1
-          EOF
-            ./magiskboot cpio ramdisk.cpio "add 0755 init.bpf.rc init.bpf.rc" "patch"
-          fi
-
-          if [ -f "boot.img" ]; then
-            ./magiskboot repack boot.img compiled_bpf_boot.img
-          else
-            ./magiskboot repack kernel compiled_bpf_boot.img
           fi
 
       - name: Build AnyKernel3 Flashable Zip
@@ -163,10 +116,10 @@ jobs:
           
           cat > anykernel3/anykernel.sh <<'EOF'
           ### AnyKernel3 Mod Script
-          ## MT6877 BPF Clang Compiled Kernel
+          ## MT6877 Official Clang Native Kernel
 
           properties() { '
-          kernel.string=MT6877 BPF Clang Compiled Kernel
+          kernel.string=MT6877 Official Clang Native Kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -184,13 +137,13 @@ jobs:
           write_boot;
           EOF
 
-          cp workdir/compiled_bpf_boot.img anykernel3/boot.img
+          cp workdir/kernel anykernel3/Image.gz 2>/dev/null || cp workdir/kernel anykernel3/Image
           cd anykernel3
           rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../MT6877-BPF-Kernel-Clang.zip" . -x ".git/*"
+          zip -r9 "../MT6877-Official-Native-Kernel.zip" . -x ".git/*"
 
-      - name: Upload Artifact
+      - name: Upload Final Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MT6877-BPF-Kernel-Clang
-          path: MT6877-BPF-Kernel-Clang.zip
+          name: MT6877-Official-Native-Kernel
+          path: MT6877-Official-Native-Kernel.zip
