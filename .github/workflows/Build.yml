@@ -2,12 +2,16 @@ name: Build Infinix Zero 5G 2023 Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      defconfig_override:
+        description: "Exact defconfig filename (leave blank to auto-detect)"
+        required: false
+        default: ""
 
 env:
   TZ: Asia/Karachi
-  KERNEL_REPO: "whoisgabutuniverseshit/device_infinix_X6815D-kernel"
-  KERNEL_BRANCH: "main"
-  DEFCONFIG_NAME: "vendor/x6815_defconfig"
+  KERNEL_REPO: "xiaomi-mediatek-devs/android_kernel_xiaomi_mt6877"
+  KERNEL_BRANCH: "lineage-21"
   ANYKERNEL_REPO: "osm0sis/AnyKernel3"
   ANYKERNEL_BRANCH: "master"
   CLANG_VERSION: "r487747c"
@@ -46,22 +50,49 @@ jobs:
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
+      - name: Detect Defconfig
+        id: detect
+        run: |
+          cd "$GITHUB_WORKSPACE/source"
+          MANUAL="${{ github.event.inputs.defconfig_override }}"
+
+          if [ -n "$MANUAL" ] && [ -f "arch/arm64/configs/$MANUAL" ]; then
+            echo "Using manually specified defconfig: $MANUAL"
+            echo "defconfig=$MANUAL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Searching arch/arm64/configs/ for a matching config..."
+          find arch/arm64/configs/ -maxdepth 1 -name "*defconfig*" | sort
+
+          # Try to auto-match something referencing this SoC/codename before falling back
+          MATCH=$(find arch/arm64/configs/ -maxdepth 1 -iname "*6877*defconfig*" | head -n1)
+          if [ -z "$MATCH" ]; then
+            MATCH=$(find arch/arm64/configs/ -maxdepth 1 -iname "*mtk*defconfig*" | head -n1)
+          fi
+
+          if [ -z "$MATCH" ]; then
+            echo "::error:: Could not auto-detect a defconfig. Re-run this workflow with"
+            echo "::error:: 'defconfig_override' set to one of the filenames listed above"
+            echo "::error:: (relative to arch/arm64/configs/, e.g. mt6877-perf_defconfig)."
+            exit 1
+          fi
+
+          FOUND_NAME=$(basename "$MATCH")
+          echo "Auto-detected defconfig: $FOUND_NAME"
+          echo "defconfig=$FOUND_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Auto-Inject Working BPF Patches to Defconfig
         run: |
           cd "$GITHUB_WORKSPACE/source"
-          TARGET_CONFIG="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+          TARGET_CONFIG="arch/arm64/configs/${{ steps.detect.outputs.defconfig }}"
 
           if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "::error:: Defconfig file path invalid! Checking if file exists without vendor prefix..."
-            TARGET_CONFIG="arch/arm64/configs/x6815_defconfig"
-            if [ ! -f "$TARGET_CONFIG" ]; then
-                echo "::error:: Defconfig truly missing. Falling back to search."
-                find arch/arm64/configs/ -name "*defconfig*"
-                exit 1
-            fi
+            echo "::error:: Detected defconfig vanished unexpectedly: $TARGET_CONFIG"
+            exit 1
           fi
 
-          echo "Appending BPF and ColorOS compatibility tweaks..."
+          echo "Appending BPF compatibility tweaks to $TARGET_CONFIG ..."
           cat << 'EOF' >> "$TARGET_CONFIG"
           # BPF Android Framework Requirements
           CONFIG_BPF=y
@@ -92,14 +123,7 @@ jobs:
           # Clean and compile
           make O=out clean
           make O=out mrproper
-
-          # Dynamically verify config fallback name from step above
-          if [ -f "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" ]; then
-             make O=out "${{ env.DEFCONFIG_NAME }}"
-          else
-             make O=out x6815_defconfig
-          fi
-
+          make O=out "${{ steps.detect.outputs.defconfig }}"
           make -j"$(nproc --all)" O=out
 
       - name: Package with AnyKernel3
@@ -118,7 +142,7 @@ jobs:
             exit 1
           fi
 
-          # Clone packaging repository using corrected syntax
+          # Clone packaging repository
           git clone --depth=1 -b "${{ env.ANYKERNEL_BRANCH }}" "https://github.com/${{ env.ANYKERNEL_REPO }}.git" anykernel
           cp "$KERN_FILE" anykernel/
 
@@ -133,5 +157,5 @@ jobs:
       - name: Upload Flashable Kernel Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero5G-ColorOS-Kernel
+          name: Infinix-Zero5G-Kernel
           path: Infinix_Zero5G_2023_Kernel.zip
