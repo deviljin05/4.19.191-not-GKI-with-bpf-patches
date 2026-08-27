@@ -28,6 +28,10 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
+          set -e
+          # lib32z1-dev / lib32ncurses5-dev are :i386 packages — apt can't find
+          # them on ubuntu-22.04 runners until the i386 architecture is enabled.
+          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
             flex bison libelf-dev clang lld git zip unzip ccache kmod \
