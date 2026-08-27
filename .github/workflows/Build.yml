@@ -35,10 +35,30 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 -b "${{ env.KERNEL_BRANCH }}" "https://github.com/${{ env.KERNEL_REPO }}.git" "$GITHUB_WORKSPACE/source"
+          set -e
+          git clone --depth=1 --recurse-submodules --shallow-submodules \
+            -b "${{ env.KERNEL_BRANCH }}" "https://github.com/${{ env.KERNEL_REPO }}.git" "$GITHUB_WORKSPACE/source"
+
+          # Surface any submodule that failed to fetch instead of discovering it
+          # mid-compile as a missing Makefile.
+          cd "$GITHUB_WORKSPACE/source"
+          if [ -f .gitmodules ]; then
+            echo "Submodules declared in this tree:"
+            git config --file .gitmodules --get-regexp path | awk '{print $2}'
+            git submodule status | tee /tmp/submodule-status.txt
+            if grep -q '^-' /tmp/submodule-status.txt; then
+              echo "::error:: One or more submodules failed to initialize (see '-' entries above)."
+              echo "::error:: These are likely vendor driver blobs not present at the pinned commit."
+              exit 1
+            fi
+          else
+            echo "No .gitmodules found — if drivers still reference missing paths later,"
+            echo "those directories are absent from this tree entirely (not a submodule issue)."
+          fi
 
       - name: Download AOSP Clang & GCC Toolchains
         run: |
+          set -e
           mkdir -p "$GITHUB_WORKSPACE/toolchain"
           cd "$GITHUB_WORKSPACE/toolchain"
 
@@ -49,6 +69,14 @@ jobs:
           # Pull standard GNU cross-binutils mappings
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+
+          # Fail loudly right here if either toolchain didn't actually land, instead
+          # of failing deep inside `make` with a cryptic "No such file" later.
+          echo "Verifying toolchain binaries exist..."
+          test -x clang/bin/clang || { echo "::error:: clang binary missing after extraction"; exit 1; }
+          test -x gcc64/bin/aarch64-linux-android-gcc || { echo "::error:: gcc64/bin/aarch64-linux-android-gcc missing after clone"; ls -la gcc64/bin/ 2>/dev/null || echo "gcc64/bin/ does not exist"; exit 1; }
+          test -x gcc32/bin/arm-linux-androideabi-gcc || { echo "::error:: gcc32/bin/arm-linux-androideabi-gcc missing after clone"; ls -la gcc32/bin/ 2>/dev/null || echo "gcc32/bin/ does not exist"; exit 1; }
+          echo "Toolchain OK."
 
       - name: Detect Defconfig
         id: detect
