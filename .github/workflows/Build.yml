@@ -35,7 +35,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
             flex bison libelf-dev clang lld git zip unzip ccache kmod \
-            lib32z1-dev lib32ncurses5-dev
+            lib32z1-dev lib32ncurses5-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
 
       - name: Clone Kernel Source
         run: |
@@ -60,33 +61,74 @@ jobs:
             echo "those directories are absent from this tree entirely (not a submodule issue)."
           fi
 
-      - name: Download AOSP Clang & GCC Toolchains
+      - name: Prune Dangling Driver Kbuild References
+        run: |
+          cd "$GITHUB_WORKSPACE/source"
+          python3 - << 'PYEOF'
+          import re, os
+
+          pattern = re.compile(r'^(\s*obj-\$\(CONFIG_[A-Za-z0-9_]+\)\s*\+=\s*)([A-Za-z0-9_\-]+)/(\s*)$')
+          pruned = 0
+
+          for root, dirs, files in os.walk('.'):
+              if '.git' in root.split(os.sep):
+                  continue
+              for fname in files:
+                  if fname not in ('Makefile', 'Kbuild'):
+                      continue
+                  fpath = os.path.join(root, fname)
+                  try:
+                      with open(fpath, 'r', errors='ignore') as f:
+                          lines = f.readlines()
+                  except OSError:
+                      continue
+
+                  changed = False
+                  for i, line in enumerate(lines):
+                      m = pattern.match(line.rstrip('\n'))
+                      if not m:
+                          continue
+                      subdir = m.group(2)
+                      target = os.path.join(root, subdir)
+                      has_build_file = os.path.isfile(os.path.join(target, 'Makefile')) or os.path.isfile(os.path.join(target, 'Kbuild'))
+                      if not os.path.isdir(target) or not has_build_file:
+                          print(f"Pruning dangling reference in {fpath}: {subdir}/ (missing build file)")
+                          lines[i] = f"# PRUNED (missing dir/Makefile): {line}"
+                          changed = True
+                          pruned += 1
+
+                  if changed:
+                      with open(fpath, 'w') as f:
+                          f.writelines(lines)
+
+          print(f"Pruned {pruned} dangling Kbuild reference(s).")
+          PYEOF
+
+      - name: Download AOSP Clang Toolchain
         run: |
           set -e
           mkdir -p "$GITHUB_WORKSPACE/toolchain"
           cd "$GITHUB_WORKSPACE/toolchain"
 
-          # Pull official stable Google prebuilt Android Clang components
+          # Pull official stable Google prebuilt Android Clang components.
+          # NOTE: we no longer download Google's prebuilt GCC repos for
+          # CROSS_COMPILE — those trees have dropped the actual gcc compiler
+          # binary and ship binutils only, but this kernel's Makefile invokes
+          # $(CROSS_COMPILE)gcc directly in several places (plugin/version
+          # detection) even though CC=clang does the real compiling. We use
+          # Ubuntu's own gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf
+          # packages instead (installed in the deps step) — they're real,
+          # always-available compilers, just with a "-linux-gnu-" instead of
+          # "-linux-android-" prefix, which makes no functional difference
+          # for building a freestanding kernel image.
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${{ env.CLANG_TAG }}/clang-${{ env.CLANG_VERSION }}.tar.gz" -O clang.tar.gz
           mkdir -p clang && tar -xzf clang.tar.gz -C clang && rm clang.tar.gz
 
-          # NOTE: the default branch (master/main) of Google's prebuilt GCC repos
-          # was stripped down to just an OWNERS file years ago, once AOSP moved
-          # fully to LLVM/Clang. We pin to android12L-gsi, the last branch that
-          # still carries the actual gcc-4.9 binaries in bin/.
-          git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
-          git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
-
-          # NOTE: modern AOSP prebuilt GCC repos (even on android12L-gsi) no
-          # longer ship an actual gcc compiler binary — only GNU binutils
-          # (ld, ar, nm, objcopy, objdump, strip, etc). That's expected and
-          # fine here: the kernel is compiled with clang (CC=clang); these
-          # trees only supply CROSS_COMPILE's binutils, not a compiler.
           echo "Verifying toolchain binaries exist..."
           test -x clang/bin/clang || { echo "::error:: clang binary missing after extraction"; exit 1; }
-          test -x gcc64/bin/aarch64-linux-android-ld.bfd || { echo "::error:: gcc64 binutils (ld.bfd) missing after clone"; ls -la gcc64/bin/ 2>/dev/null || echo "gcc64/bin/ does not exist"; exit 1; }
-          test -x gcc32/bin/arm-linux-androideabi-ld.bfd || { echo "::error:: gcc32 binutils (ld.bfd) missing after clone"; ls -la gcc32/bin/ 2>/dev/null || echo "gcc32/bin/ does not exist"; exit 1; }
-          echo "Toolchain OK (clang + cross binutils)."
+          command -v aarch64-linux-gnu-gcc >/dev/null || { echo "::error:: aarch64-linux-gnu-gcc not found (apt install failed?)"; exit 1; }
+          command -v arm-linux-gnueabihf-gcc >/dev/null || { echo "::error:: arm-linux-gnueabihf-gcc not found (apt install failed?)"; exit 1; }
+          echo "Toolchain OK (clang + real aarch64/arm cross-gcc from apt)."
 
       - name: Detect Defconfig
         id: detect
@@ -147,16 +189,18 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/source"
 
-          # Establish path references to toolchain binary nodes
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+          # Establish path references to toolchain binary nodes.
+          # Cross-gcc comes from apt (gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf)
+          # and is already on PATH system-wide; only clang needs the explicit path.
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
 
           # Export targeted variables
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
 
           # Clean and compile
           make O=out clean
