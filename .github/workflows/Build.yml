@@ -1,268 +1,121 @@
-name: MT6877 (ruby) Kernel Build — lineage-21 — BPF Patched
+name: Build Infinix Zero 5G 2023 Kernel
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Karachi
+  # CHANGE THESE TO MATCH YOUR ACTUAL REPOSITORY CONFIGURATION
+  KERNEL_REPO: "whoisgabutuniverseshit/device_infinix_X6815D-kernel"
+  KERNEL_BRANCH: "main"
+  DEFCONFIG_NAME: "vendor/x6815_defconfig"
+  ANYKERNEL_REPO: "osm0sis/AnyKernel3"
+  ANYKERNEL_BRANCH: "master"
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-latest
+  kernel-compile:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
+      - name: Maximize Build Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell
+          sudo apt-get clean
 
       - name: Install Build Dependencies
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            make bc bison flex libssl-dev libelf-dev libncurses5-dev \
-            git curl wget zip unzip cpio lld llvm
+          sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
+            flex bison libelf-dev clang lld git zip unzip ccache kmod format-junkie \
+            lib32z1-dev lib32ncurses5-dev libssl-dev
 
-      - name: Clone MT6877 (ruby) Kernel Source — lineage-21
+      - name: Clone Kernel Source
         run: |
-          set -euo pipefail
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 \
-            -b lineage-21 https://github.com/xiaomi-mediatek-devs/android_kernel_xiaomi_mt6877 kernel_src
-          test -f kernel_src/Makefile
-          echo "Kernel version:"
-          grep -m3 -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" kernel_src/Makefile
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} https://github.com{{ env.KERNEL_REPO }}.git $GITHUB_WORKSPACE/source
 
-      # Known source-level breakages in this tree that show up regardless of
-      # the BPF config additions below:
-      #   1. drivers/cpuidle/cpuidle-mediatek.c includes a local header with
-      #      <angled> brackets instead of "quotes", so clang's include search
-      #      never finds it (it's not a system header).
-      #   2. drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-qos.c has the exact
-      #      same angled-vs-quoted bug for its own local header.
-      #   3. drivers/devfreq/helio-dvfsrc-v3/helio-dvfsrc-v6877.c has the same
-      #      angled-vs-quoted bug for helio-dvfsrc-v6877.h — confirmed from
-      #      build log ("file not found with <angled> include; use "quotes"
-      #      instead"), hit twice in the same build (once under drivers/,
-      #      once when make revisits the target after arch/arm64/lib).
-      #   4. kernel/trace/mtk_trace.c #includes mtk_ftrace.h via the
-      #      TRACE_INCLUDE_PATH machinery, but mtk_ftrace.h doesn't exist
-      #      anywhere in this tree — it's an orphaned vendor trace file, not
-      #      something the BPF config path needs. Rather than fabricate a
-      #      missing vendor header, its build rule is dropped from
-      #      kernel/trace/Makefile so it's never compiled.
-      # NOTE: this angled-vs-quoted bug is not confined to one file per header —
-      # the same local header gets #include <...>'d from several .c/.h files
-      # across a directory (e.g. helio-dvfsrc-qos.h is pulled in by both
-      # helio-dvfsrc-qos.c AND helio-dvfsrc-sysfs.c AND helio-dvfsrc-ip-v2.h).
-      # So instead of patching one file at a time whack-a-mole style, every
-      # known-broken header is fixed tree-wide, in every file that includes it.
-      # If a future build log shows the same "file not found with <angled>
-      # include; use quotes instead" error for a header not in this list,
-      # just add its filename to BROKEN_LOCAL_HEADERS below.
-      - name: Patch Known Source Issues
+      - name: Download AOSP Clang & GCC Toolchains
         run: |
-          set -euo pipefail
-          cd kernel_src
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          cd $GITHUB_WORKSPACE/toolchain
+          
+          # Pull official production Google prebuilt Android Clang components
+          wget -q https://googlesource.com
+          tar -xzf clang-r487747c.tar.gz && rm clang-r487747c.tar.gz
+          
+          # Pull matching standard GNU cross-binutils mappings
+          git clone --depth=1 https://googlesource.com gcc64
+          git clone --depth=1 https://googlesource.com gcc32
 
-          BROKEN_LOCAL_HEADERS="
-            dt_idle_states.h
-            helio-dvfsrc-qos.h
-            helio-dvfsrc-v6877.h
-            mtk_dvfsrc_reg_v2.h
-            mtk_dvfsrc_smc_reg.h
-            mtk-dsp-mem-control.h
-            mtk-base-dsp.h
-            mtk-dsp-common.h
-          "
-
-          for header in $BROKEN_LOCAL_HEADERS; do
-            escaped=$(printf '%s' "$header" | sed 's/[.[\*^$/]/\\&/g')
-            matches=$(grep -rl "#include <${header}>" --include='*.c' --include='*.h' . || true)
-            if [ -z "$matches" ]; then
-              echo "NOTE: no angled #include <${header}> found (already clean, or not present)"
-              continue
-            fi
-            echo "$matches" | while IFS= read -r f; do
-              sed -i "s/#include <${escaped}>/#include \"${header}\"/" "$f"
-              echo "patched: $f"
-            done
-          done
-
-          sed -i '/mtk_trace\.o/d' kernel/trace/Makefile
-
-          echo "=== Confirm no angled includes remain for known-broken headers ==="
-          for header in $BROKEN_LOCAL_HEADERS; do
-            grep -rl "#include <${header}>" --include='*.c' --include='*.h' . && \
-              { echo "ERROR: ${header} still angled-included somewhere"; exit 1; }
-          done
-          echo "clean"
-          grep -n 'mtk_trace' kernel/trace/Makefile || echo "mtk_trace.o reference removed"
-
-      # ruby_defconfig (this tree's device fragment) has NO binder/ashmem/
-      # netfilter/net_sched entries at all, same as the stock repo's fragment —
-      # those live in gki_defconfig. Merge order: gki_defconfig (base) ->
-      # k6877v1_64_k419_defconfig (MT6877 chip) -> ruby_defconfig (device).
-      - name: Build Config (merged) + BPF Patches
+      - name: Auto-Inject Working BPF Patches to Defconfig
         run: |
-          set -euo pipefail
-          cd kernel_src
-          export ARCH=arm64
-
-          BASE=arch/arm64/configs/gki_defconfig
-          CHIP=arch/arm64/configs/k6877v1_64_k419_defconfig
-          DEVICE=arch/arm64/configs/ruby_defconfig
-          for f in "$BASE" "$CHIP" "$DEVICE"; do
-            test -f "$f" || { echo "ERROR: missing $f — branch layout changed, check arch/arm64/configs/"; exit 1; }
-          done
-
-          scripts/kconfig/merge_config.sh -m -O . "$BASE" "$CHIP" "$DEVICE"
-
-          # Checked option-by-option against this tree's actual Kconfig (still
-          # 4.19.x). CONFIG_BPF_LSM and CONFIG_DEBUG_INFO_BTF need kernel 5.7+
-          # and don't exist here — left out on purpose. CONFIG_PERF_EVENTS is
-          # added explicitly since BPF_EVENTS depends on it and it isn't on
-          # anywhere in the defconfig chain.
-          #
-          # CONFIG_CGROUP_SCHED / CONFIG_FAIR_GROUP_SCHED are added because
-          # kernel/sched/extension/eas_plus.c references
-          # sched_entity->my_q, which only exists when
-          # CONFIG_FAIR_GROUP_SCHED is enabled — without it the build fails
-          # with "no member named 'my_q' in 'struct sched_entity'".
-          cat << 'EOF' >> .config
+          cd $GITHUB_WORKSPACE/source
+          TARGET_CONFIG="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+          
+          if [ ! -f "$TARGET_CONFIG" ]; then
+            echo "::error:: Defconfig file path invalid! Check your repository setup."
+            exit 1
+          fi
+          
+          echo "Appending BPF configurations to prevent bootloops on ColorOS framework..."
+          cat << 'EOF' >> "$TARGET_CONFIG"
+          # BPF Android Framework Requirements
           CONFIG_BPF=y
           CONFIG_BPF_SYSCALL=y
-          CONFIG_CGROUP_SCHED=y
-          CONFIG_FAIR_GROUP_SCHED=y
-          CONFIG_BPF_JIT=y
-          CONFIG_BPF_JIT_ALWAYS_ON=y
-          CONFIG_HAVE_EBPF_JIT=y
-          CONFIG_CGROUP_BPF=y
-          CONFIG_PERF_EVENTS=y
-          CONFIG_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_BPF_EVENTS=y
-          CONFIG_TRACEPOINTS=y
           CONFIG_NET_CLS_ACT=y
           CONFIG_NET_ACT_BPF=y
-          CONFIG_NET_CLS_BPF=y
-          CONFIG_NETFILTER_XT_MATCH_BPF=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_BPF_JIT=y
+          CONFIG_BPF_JIT_ALWAYS_ON=y
+          CONFIG_SECURITY_SELINUX_DEVELOP=y
           EOF
 
-          # yes "" feeds a blank/default answer to any interactive prompt
-          # olddefconfig throws up for newly-exposed config options (like the
-          # COMPAT_VDSO / LTO / SHADOW_CALL_STACK prompts seen in earlier
-          # build logs), instead of the build silently hanging/failing there.
-          #
-          # `yes` gets SIGPIPE the moment olddefconfig finishes reading stdin,
-          # which it reports as "Broken pipe" and a non-zero exit (141). With
-          # `set -o pipefail` that would fail this whole step even when
-          # olddefconfig itself succeeded — so pipefail is turned off just for
-          # this line and only olddefconfig's own exit status is checked.
-          set +o pipefail
-          yes "" | make olddefconfig
-          OLDDEFCONFIG_STATUS=${PIPESTATUS[1]}
-          set -o pipefail
-          if [ "$OLDDEFCONFIG_STATUS" -ne 0 ]; then
-            echo "ERROR: make olddefconfig failed (exit $OLDDEFCONFIG_STATUS)"
-            exit 1
-          fi
-
-          echo "=== Applied BPF/related config — confirm nothing silently dropped ==="
-          grep -E "^CONFIG_(BPF|KPROBE|NET_CLS|NET_ACT|NETFILTER_XT_MATCH_BPF|PERF_EVENTS|CGROUP_SCHED|FAIR_GROUP_SCHED)" .config
-
-      - name: Download AOSP Clang r383902 (pinned by this kernel's build.config)
+      - name: Execute Kernel Compilation
         run: |
-          set -euo pipefail
-          mkdir -p toolchains/clang
-          cd toolchains/clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r28/clang-r383902.tar.gz
-          tar -xf clang-r383902.tar.gz
-          test -x bin/clang || { echo "ERROR: clang binary missing after extraction"; exit 1; }
-          test -x bin/ld.lld || { echo "ERROR: ld.lld missing after extraction"; exit 1; }
-
-      - name: Compile Kernel
-        run: |
-          set -euo pipefail
-          cd kernel_src
-
-          export PATH="$(pwd)/../toolchains/clang/bin:${PATH}"
+          cd $GITHUB_WORKSPACE/source
+          
+          # Establish path references to toolchain bin nodes
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+          
+          # Export targeted variables
           export ARCH=arm64
           export SUBARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
-          export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export READELF=llvm-readelf
-          export OBJSIZE=llvm-size
-          export STRIP=llvm-strip
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          
+          # Clean and compile
+          make O=out clean
+          make O=out mrproper
+          make O=out ${{ env.DEFCONFIG_NAME }}
+          make -j$(nproc --all) O=out
 
-          set +e
-          make -j"$(nproc --all)" Image.gz 2>&1 | tee ../build.log
-          STATUS=${PIPESTATUS[0]}
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            echo "Image.gz target failed (or doesn't exist for this config) — retrying with plain Image target..."
-            make -j"$(nproc --all)" Image 2>&1 | tee -a ../build.log
-          fi
-
-      - name: Verify Output Binary
+      - name: Package with AnyKernel3
         run: |
-          set -euo pipefail
-          cd kernel_src
-          mkdir -p ../workdir
-          if [ -f "arch/arm64/boot/Image.gz" ]; then
-            echo "SUCCESS: Image.gz compiled."
-            cp arch/arm64/boot/Image.gz ../workdir/kernel
-          elif [ -f "arch/arm64/boot/Image" ]; then
-            echo "SUCCESS: Image compiled."
-            cp arch/arm64/boot/Image ../workdir/kernel
+          cd $GITHUB_WORKSPACE
+          
+          # Verify compilation output exists
+          if [ -f "source/out/arch/arm64/boot/Image.gz-dtb" ]; then
+            export KERNEL_IMAGE="$GITHUB_WORKSPACE/source/out/arch/arm64/boot/Image.gz-dtb"
+          elif [ -f "source/out/arch/arm64/boot/Image.gz" ]; then
+            export KERNEL_IMAGE="$GITHUB_WORKSPACE/source/out/arch/arm64/boot/Image.gz"
           else
-            echo "ERROR: no kernel image produced. See build-log artifact."
+            echo "::error:: Compilation output target not found! Build failed."
             exit 1
           fi
+          
+          # Clone packaging repository
+          git clone --depth=1 -b ${{ env.ANYKERNEL_BRANCH }} https://github.com{{ env.ANYKERNEL_REPO }}.git anykernel
+          cp "$KERNEL_IMAGE" anykernel/
+          
+          # Configure basic installation parameters inside anykernel script layout
+          cd anykernel
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          
+          # Generate flashable zip archive artifact
+          zip -r9 ../Infinix_Zero5G_2023_Kernel.zip * -x .git* README.md
 
-      - name: Upload build log
-        if: always()
+      - name: Upload Flashable Kernel Zip
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
-          if-no-files-found: ignore
-
-      - name: Build AnyKernel3 Zip
-        run: |
-          set -euo pipefail
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 anykernel3
-
-          cat > anykernel3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Mod Script
-          ## MT6877 (ruby) lineage-21 Kernel — BPF patched
-
-          properties() { '
-          kernel.string=MT6877 ruby lineage-21 Kernel (BPF)
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          block=auto
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          '; }
-
-          [ -f /tmp/anykernel/tools/ak3-core.sh ] && . /tmp/anykernel/tools/ak3-core.sh || . tools/ak3-core.sh
-
-          dump_boot;
-          write_boot;
-          EOF
-
-          cp workdir/kernel anykernel3/Image.gz 2>/dev/null || cp workdir/kernel anykernel3/Image
-          cd anykernel3
-          rm -rf .git README.md LICENSE .github 2>/dev/null || true
-          zip -r9 "../MT6877-ruby-lineage21-BPF-Kernel.zip" . -x ".git/*"
-
-      - name: Upload Zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: MT6877-ruby-lineage21-BPF-Kernel
-          path: MT6877-ruby-lineage21-BPF-Kernel.zip
+          name: Infinix-Zero5G-ColorOS-Kernel
+          path: Infinix_Zero5G_2023_Kernel.zip
