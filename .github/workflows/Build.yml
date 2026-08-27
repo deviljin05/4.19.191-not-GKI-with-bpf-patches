@@ -29,7 +29,7 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} https://github.com{{ env.KERNEL_REPO }}.git $GITHUB_WORKSPACE/source
+          git clone --depth=1 -b "${{ env.KERNEL_BRANCH }}" "https://github.com{{ env.KERNEL_REPO }}.git" "$GITHUB_WORKSPACE/source"
 
       - name: Download AOSP Clang & GCC Toolchains
         run: |
@@ -116,8 +116,8 @@ jobs:
             exit 1
           fi
           
-          # Clone packaging repository
-          git clone --depth=1 -b ${{ env.ANYKERNEL_BRANCH }} https://github.com{{ env.ANYKERNEL_REPO }}.git anykernel
+          # Clone packaging repository using corrected syntax
+          git clone --depth=1 -b "${{ env.ANYKERNEL_BRANCH }}" "https://github.com{{ env.ANYKERNEL_REPO }}.git" anykernel
           cp "$KERN_FILE" anykernel/
           
           # Configure basic installation parameters inside anykernel script layout
