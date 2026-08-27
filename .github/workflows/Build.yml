@@ -5,7 +5,6 @@ on:
 
 env:
   TZ: Asia/Karachi
-  # CHANGE THESE TO MATCH YOUR ACTUAL REPOSITORY CONFIGURATION
   KERNEL_REPO: "whoisgabutuniverseshit/device_infinix_X6815D-kernel"
   KERNEL_BRANCH: "main"
   DEFCONFIG_NAME: "vendor/x6815_defconfig"
@@ -25,8 +24,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
-            flex bison libelf-dev clang lld git zip unzip ccache kmod format-junkie \
-            lib32z1-dev lib32ncurses5-dev libssl-dev
+            flex bison libelf-dev clang lld git zip unzip ccache kmod \
+            lib32z1-dev lib32ncurses5-dev
 
       - name: Clone Kernel Source
         run: |
@@ -37,13 +36,13 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
           
-          # Pull official production Google prebuilt Android Clang components
+          # Pull official stable Google prebuilt Android Clang components
           wget -q https://googlesource.com
           tar -xzf clang-r487747c.tar.gz && rm clang-r487747c.tar.gz
           
-          # Pull matching standard GNU cross-binutils mappings
-          git clone --depth=1 https://googlesource.com gcc64
-          git clone --depth=1 https://googlesource.com gcc32
+          # Pull standard GNU cross-binutils mappings
+          git clone --depth=1 https://googlesource.com -b master gcc64
+          git clone --depth=1 https://googlesource.com -b master gcc32
 
       - name: Auto-Inject Working BPF Patches to Defconfig
         run: |
@@ -51,11 +50,16 @@ jobs:
           TARGET_CONFIG="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           
           if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "::error:: Defconfig file path invalid! Check your repository setup."
-            exit 1
+            echo "::error:: Defconfig file path invalid! Checking if file exists without vendor prefix..."
+            TARGET_CONFIG="arch/arm64/configs/x6815_defconfig"
+            if [ ! -f "$TARGET_CONFIG" ]; then
+                echo "::error:: Defconfig truly missing. Falling back to search."
+                find arch/arm64/configs/ -name "*defconfig*"
+                exit 1
+            fi
           fi
           
-          echo "Appending BPF configurations to prevent bootloops on ColorOS framework..."
+          echo "Appending BPF and ColorOS compatibility tweaks..."
           cat << 'EOF' >> "$TARGET_CONFIG"
           # BPF Android Framework Requirements
           CONFIG_BPF=y
@@ -72,7 +76,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/source
           
-          # Establish path references to toolchain bin nodes
+          # Establish path references to toolchain binary nodes
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
           
           # Export targeted variables
@@ -86,18 +90,27 @@ jobs:
           # Clean and compile
           make O=out clean
           make O=out mrproper
-          make O=out ${{ env.DEFCONFIG_NAME }}
+          
+          # Dynamically verify config fallback name from step above
+          if [ -f "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" ]; then
+             make O=out ${{ env.DEFCONFIG_NAME }}
+          else
+             make O=out x6815_defconfig
+          fi
+          
           make -j$(nproc --all) O=out
 
       - name: Package with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
           
-          # Verify compilation output exists
+          # Verify compilation output exists dynamically
           if [ -f "source/out/arch/arm64/boot/Image.gz-dtb" ]; then
-            export KERNEL_IMAGE="$GITHUB_WORKSPACE/source/out/arch/arm64/boot/Image.gz-dtb"
+            cp source/out/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
+            export KERN_FILE="$GITHUB_WORKSPACE/Image.gz-dtb"
           elif [ -f "source/out/arch/arm64/boot/Image.gz" ]; then
-            export KERNEL_IMAGE="$GITHUB_WORKSPACE/source/out/arch/arm64/boot/Image.gz"
+            cp source/out/arch/arm64/boot/Image.gz $GITHUB_WORKSPACE/Image.gz
+            export KERN_FILE="$GITHUB_WORKSPACE/Image.gz"
           else
             echo "::error:: Compilation output target not found! Build failed."
             exit 1
@@ -105,11 +118,12 @@ jobs:
           
           # Clone packaging repository
           git clone --depth=1 -b ${{ env.ANYKERNEL_BRANCH }} https://github.com{{ env.ANYKERNEL_REPO }}.git anykernel
-          cp "$KERNEL_IMAGE" anykernel/
+          cp "$KERN_FILE" anykernel/
           
           # Configure basic installation parameters inside anykernel script layout
           cd anykernel
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/block=\/dev\/block\/platform\/omap\/omap_hsmmc.0\/by-name\/boot;/block=auto;/g' anykernel.sh
           
           # Generate flashable zip archive artifact
           zip -r9 ../Infinix_Zero5G_2023_Kernel.zip * -x .git* README.md
