@@ -66,9 +66,12 @@ jobs:
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${{ env.CLANG_TAG }}/clang-${{ env.CLANG_VERSION }}.tar.gz" -O clang.tar.gz
           mkdir -p clang && tar -xzf clang.tar.gz -C clang && rm clang.tar.gz
 
-          # Pull standard GNU cross-binutils mappings
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+          # NOTE: the default branch (master/main) of Google's prebuilt GCC repos
+          # was stripped down to just an OWNERS file years ago, once AOSP moved
+          # fully to LLVM/Clang. We pin to android12L-gsi, the last branch that
+          # still carries the actual gcc-4.9 binaries in bin/.
+          git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
           # Fail loudly right here if either toolchain didn't actually land, instead
           # of failing deep inside `make` with a cryptic "No such file" later.
