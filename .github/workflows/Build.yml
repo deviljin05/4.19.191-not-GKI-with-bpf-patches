@@ -77,13 +77,16 @@ jobs:
           git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
           git clone --depth=1 -b android12L-gsi https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
 
-          # Fail loudly right here if either toolchain didn't actually land, instead
-          # of failing deep inside `make` with a cryptic "No such file" later.
+          # NOTE: modern AOSP prebuilt GCC repos (even on android12L-gsi) no
+          # longer ship an actual gcc compiler binary — only GNU binutils
+          # (ld, ar, nm, objcopy, objdump, strip, etc). That's expected and
+          # fine here: the kernel is compiled with clang (CC=clang); these
+          # trees only supply CROSS_COMPILE's binutils, not a compiler.
           echo "Verifying toolchain binaries exist..."
           test -x clang/bin/clang || { echo "::error:: clang binary missing after extraction"; exit 1; }
-          test -x gcc64/bin/aarch64-linux-android-gcc || { echo "::error:: gcc64/bin/aarch64-linux-android-gcc missing after clone"; ls -la gcc64/bin/ 2>/dev/null || echo "gcc64/bin/ does not exist"; exit 1; }
-          test -x gcc32/bin/arm-linux-androideabi-gcc || { echo "::error:: gcc32/bin/arm-linux-androideabi-gcc missing after clone"; ls -la gcc32/bin/ 2>/dev/null || echo "gcc32/bin/ does not exist"; exit 1; }
-          echo "Toolchain OK."
+          test -x gcc64/bin/aarch64-linux-android-ld.bfd || { echo "::error:: gcc64 binutils (ld.bfd) missing after clone"; ls -la gcc64/bin/ 2>/dev/null || echo "gcc64/bin/ does not exist"; exit 1; }
+          test -x gcc32/bin/arm-linux-androideabi-ld.bfd || { echo "::error:: gcc32 binutils (ld.bfd) missing after clone"; ls -la gcc32/bin/ 2>/dev/null || echo "gcc32/bin/ does not exist"; exit 1; }
+          echo "Toolchain OK (clang + cross binutils)."
 
       - name: Detect Defconfig
         id: detect
