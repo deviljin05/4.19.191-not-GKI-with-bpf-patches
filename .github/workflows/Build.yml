@@ -36,7 +36,7 @@ jobs:
           sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
             flex bison libelf-dev clang lld git zip unzip ccache kmod \
             lib32z1-dev lib32ncurses5-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+            crossbuild-essential-arm64 crossbuild-essential-armhf
 
       - name: Clone Kernel Source
         run: |
