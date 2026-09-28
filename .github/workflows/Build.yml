@@ -1,243 +1,386 @@
-name: Build Infinix Zero 5G 2023 Kernel
+name: Build X6815C Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      defconfig_override:
-        description: "Exact defconfig filename (leave blank to auto-detect)"
+      defconfig:
+        description: "Kernel defconfig path/name. Leave empty for auto-detect."
         required: false
         default: ""
-
-env:
-  TZ: Asia/Karachi
-  KERNEL_REPO: "xiaomi-mediatek-devs/android_kernel_xiaomi_mt6877"
-  KERNEL_BRANCH: "lineage-21"
-  ANYKERNEL_REPO: "osm0sis/AnyKernel3"
-  ANYKERNEL_BRANCH: "master"
-  CLANG_VERSION: "r487747c"
-  CLANG_TAG: "android-14.0.0_r1"
+      kernelsu:
+        description: "Build with KernelSU v0.9.5"
+        required: true
+        default: "true"
 
 jobs:
-  kernel-compile:
+  build:
     runs-on: ubuntu-22.04
+
+    env:
+      KERNEL_DIR: kernel-headers
+      ARCH: arm64
+      SUBARCH: arm64
+      KSU_VERSION: v0.9.5
+
     steps:
-      - name: Maximize Build Space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell
-          sudo apt-get clean
+      # ------------------------------------------------------------
+      # Source
+      # ------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Install Build Dependencies
+      # ------------------------------------------------------------
+      # Dependencies
+      # ------------------------------------------------------------
+      - name: Install dependencies
         run: |
-          set -e
-          # lib32z1-dev / lib32ncurses5-dev are :i386 packages — apt can't find
-          # them on ubuntu-22.04 runners until the i386 architecture is enabled.
-          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y bc build-essential libncurses5-dev bzip2 libssl-dev \
-            flex bison libelf-dev clang lld git zip unzip ccache kmod \
-            lib32z1-dev lib32ncurses5-dev \
-            crossbuild-essential-arm64 crossbuild-essential-armhf
 
-      - name: Clone Kernel Source
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            libncurses5-dev \
+            libncurses-dev \
+            python3 \
+            python3-pip \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip
+
+      # ------------------------------------------------------------
+      # Check kernel source
+      # ------------------------------------------------------------
+      - name: Verify kernel source
         run: |
           set -e
-          git clone --depth=1 --recurse-submodules --shallow-submodules \
-            -b "${{ env.KERNEL_BRANCH }}" "https://github.com/${{ env.KERNEL_REPO }}.git" "$GITHUB_WORKSPACE/source"
 
-          # Surface any submodule that failed to fetch instead of discovering it
-          # mid-compile as a missing Makefile.
-          cd "$GITHUB_WORKSPACE/source"
-          if [ -f .gitmodules ]; then
-            echo "Submodules declared in this tree:"
-            git config --file .gitmodules --get-regexp path | awk '{print $2}'
-            git submodule status | tee /tmp/submodule-status.txt
-            if grep -q '^-' /tmp/submodule-status.txt; then
-              echo "::error:: One or more submodules failed to initialize (see '-' entries above)."
-              echo "::error:: These are likely vendor driver blobs not present at the pinned commit."
+          cd "$KERNEL_DIR"
+
+          echo "Kernel source:"
+          pwd
+
+          echo
+          echo "Kernel version:"
+          make kernelversion || true
+
+          echo
+          echo "Checking source directories..."
+
+          for d in arch drivers fs include init ipc kernel lib mm net scripts security; do
+            if [ ! -d "$d" ]; then
+              echo "::error::$d directory is missing"
               exit 1
             fi
-          else
-            echo "No .gitmodules found — if drivers still reference missing paths later,"
-            echo "those directories are absent from this tree entirely (not a submodule issue)."
+          done
+
+          if [ ! -f Makefile ]; then
+            echo "::error::Kernel Makefile missing"
+            exit 1
           fi
 
-      - name: Prune Dangling Driver Kbuild References
-        run: |
-          cd "$GITHUB_WORKSPACE/source"
-          python3 - << 'PYEOF'
-          import re, os
+          echo "Kernel source looks valid."
 
-          pattern = re.compile(r'^(\s*obj-\$\(CONFIG_[A-Za-z0-9_]+\)\s*\+=\s*)([A-Za-z0-9_\-]+)/(\s*)$')
-          pruned = 0
-
-          for root, dirs, files in os.walk('.'):
-              if '.git' in root.split(os.sep):
-                  continue
-              for fname in files:
-                  if fname not in ('Makefile', 'Kbuild'):
-                      continue
-                  fpath = os.path.join(root, fname)
-                  try:
-                      with open(fpath, 'r', errors='ignore') as f:
-                          lines = f.readlines()
-                  except OSError:
-                      continue
-
-                  changed = False
-                  for i, line in enumerate(lines):
-                      m = pattern.match(line.rstrip('\n'))
-                      if not m:
-                          continue
-                      subdir = m.group(2)
-                      target = os.path.join(root, subdir)
-                      has_build_file = os.path.isfile(os.path.join(target, 'Makefile')) or os.path.isfile(os.path.join(target, 'Kbuild'))
-                      if not os.path.isdir(target) or not has_build_file:
-                          print(f"Pruning dangling reference in {fpath}: {subdir}/ (missing build file)")
-                          lines[i] = f"# PRUNED (missing dir/Makefile): {line}"
-                          changed = True
-                          pruned += 1
-
-                  if changed:
-                      with open(fpath, 'w') as f:
-                          f.writelines(lines)
-
-          print(f"Pruned {pruned} dangling Kbuild reference(s).")
-          PYEOF
-
-      - name: Download AOSP Clang Toolchain
+      # ------------------------------------------------------------
+      # Detect defconfig
+      # ------------------------------------------------------------
+      - name: Detect defconfig
+        id: defconfig
         run: |
           set -e
-          mkdir -p "$GITHUB_WORKSPACE/toolchain"
-          cd "$GITHUB_WORKSPACE/toolchain"
 
-          # Pull official stable Google prebuilt Android Clang components.
-          # NOTE: we no longer download Google's prebuilt GCC repos for
-          # CROSS_COMPILE — those trees have dropped the actual gcc compiler
-          # binary and ship binutils only, but this kernel's Makefile invokes
-          # $(CROSS_COMPILE)gcc directly in several places (plugin/version
-          # detection) even though CC=clang does the real compiling. We use
-          # Ubuntu's own gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf
-          # packages instead (installed in the deps step) — they're real,
-          # always-available compilers, just with a "-linux-gnu-" instead of
-          # "-linux-android-" prefix, which makes no functional difference
-          # for building a freestanding kernel image.
-          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${{ env.CLANG_TAG }}/clang-${{ env.CLANG_VERSION }}.tar.gz" -O clang.tar.gz
-          mkdir -p clang && tar -xzf clang.tar.gz -C clang && rm clang.tar.gz
+          cd "$KERNEL_DIR"
 
-          echo "Verifying toolchain binaries exist..."
-          test -x clang/bin/clang || { echo "::error:: clang binary missing after extraction"; exit 1; }
-          command -v aarch64-linux-gnu-gcc >/dev/null || { echo "::error:: aarch64-linux-gnu-gcc not found (apt install failed?)"; exit 1; }
-          command -v arm-linux-gnueabihf-gcc >/dev/null || { echo "::error:: arm-linux-gnueabihf-gcc not found (apt install failed?)"; exit 1; }
-          echo "Toolchain OK (clang + real aarch64/arm cross-gcc from apt)."
+          INPUT="${{ github.event.inputs.defconfig }}"
 
-      - name: Detect Defconfig
-        id: detect
-        run: |
-          cd "$GITHUB_WORKSPACE/source"
-          MANUAL="${{ github.event.inputs.defconfig_override }}"
-
-          if [ -n "$MANUAL" ] && [ -f "arch/arm64/configs/$MANUAL" ]; then
-            echo "Using manually specified defconfig: $MANUAL"
-            echo "defconfig=$MANUAL" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT" ]; then
+            echo "Using manually supplied defconfig: $INPUT"
+            echo "name=$INPUT" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Searching arch/arm64/configs/ for a matching config..."
-          find arch/arm64/configs/ -maxdepth 1 -name "*defconfig*" | sort
+          echo "Searching for device-specific defconfig..."
 
-          # Try to auto-match something referencing this SoC/codename before falling back
-          MATCH=$(find arch/arm64/configs/ -maxdepth 1 -iname "*6877*defconfig*" | head -n1)
-          if [ -z "$MATCH" ]; then
-            MATCH=$(find arch/arm64/configs/ -maxdepth 1 -iname "*mtk*defconfig*" | head -n1)
-          fi
+          CANDIDATES="$(find arch/arm64/configs -type f \
+            \( \
+              -iname '*x6815*' \
+              -o -iname '*x6815c*' \
+              -o -iname '*mt6877*' \
+              -o -iname '*dimensity*' \
+            \) \
+            -print | sed 's#^arch/arm64/configs/##' || true)"
 
-          if [ -z "$MATCH" ]; then
-            echo "::error:: Could not auto-detect a defconfig. Re-run this workflow with"
-            echo "::error:: 'defconfig_override' set to one of the filenames listed above"
-            echo "::error:: (relative to arch/arm64/configs/, e.g. mt6877-perf_defconfig)."
+          if [ -n "$CANDIDATES" ]; then
+            echo "Possible device defconfigs:"
+            echo "$CANDIDATES"
+
+            COUNT="$(echo "$CANDIDATES" | grep -c .)"
+
+            if [ "$COUNT" -eq 1 ]; then
+              DEFCONFIG="$CANDIDATES"
+            else
+              echo "::error::More than one possible device defconfig found."
+              echo "Set the workflow 'defconfig' input manually."
+              exit 1
+            fi
+          else
+            echo "::error::No X6815C/MT6877 defconfig was auto-detected."
+            echo
+            echo "Available arm64 defconfigs:"
+            find arch/arm64/configs -type f \
+              -maxdepth 3 \
+              -print | sort
             exit 1
           fi
 
-          FOUND_NAME=$(basename "$MATCH")
-          echo "Auto-detected defconfig: $FOUND_NAME"
-          echo "defconfig=$FOUND_NAME" >> "$GITHUB_OUTPUT"
+          echo "Selected defconfig: $DEFCONFIG"
+          echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
 
-      - name: Auto-Inject Working BPF Patches to Defconfig
+      # ------------------------------------------------------------
+      # Add KernelSU v0.9.5
+      # ------------------------------------------------------------
+      - name: Integrate KernelSU
+        if: github.event.inputs.kernelsu == 'true'
         run: |
-          cd "$GITHUB_WORKSPACE/source"
-          TARGET_CONFIG="arch/arm64/configs/${{ steps.detect.outputs.defconfig }}"
+          set -e
 
-          if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "::error:: Detected defconfig vanished unexpectedly: $TARGET_CONFIG"
+          cd "$KERNEL_DIR"
+
+          echo "Installing KernelSU $KSU_VERSION..."
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/tiann/KernelSU/$KSU_VERSION/kernel/setup.sh" \
+            | bash -s "$KSU_VERSION"
+
+          echo
+          echo "KernelSU integration complete."
+
+          if [ ! -d KernelSU ]; then
+            echo "::error::KernelSU directory was not created."
             exit 1
           fi
 
-          echo "Appending BPF compatibility tweaks to $TARGET_CONFIG ..."
-          cat << 'EOF' >> "$TARGET_CONFIG"
-          # BPF Android Framework Requirements
-          CONFIG_BPF=y
-          CONFIG_BPF_SYSCALL=y
-          CONFIG_NET_CLS_ACT=y
-          CONFIG_NET_ACT_BPF=y
-          CONFIG_CGROUP_BPF=y
-          CONFIG_BPF_JIT=y
-          CONFIG_BPF_JIT_ALWAYS_ON=y
-          CONFIG_SECURITY_SELINUX_DEVELOP=y
-          EOF
-
-      - name: Execute Kernel Compilation
+      # ------------------------------------------------------------
+      # Generate original kernel config
+      # ------------------------------------------------------------
+      - name: Generate kernel config
         run: |
-          cd "$GITHUB_WORKSPACE/source"
+          set -e
 
-          # Establish path references to toolchain binary nodes.
-          # Cross-gcc comes from apt (gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf)
-          # and is already on PATH system-wide; only clang needs the explicit path.
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
+          cd "$KERNEL_DIR"
 
-          # Export targeted variables
+          DEFCONFIG="${{ steps.defconfig.outputs.name }}"
+
+          echo "Using:"
+          echo "  ARCH=$ARCH"
+          echo "  DEFCONFIG=$DEFCONFIG"
+
+          make \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            O="$GITHUB_WORKSPACE/out" \
+            "$DEFCONFIG"
+
+      # ------------------------------------------------------------
+      # Enable BPF + KernelSU configuration
+      # ------------------------------------------------------------
+      - name: Configure BPF and KernelSU
+        run: |
+          set -e
+
+          cd "$KERNEL_DIR"
+
+          CONFIG="$GITHUB_WORKSPACE/out/.config"
+
+          echo "Config file:"
+          echo "$CONFIG"
+
+          # --------------------------------------------------------
+          # BPF
+          # --------------------------------------------------------
+
+          ./scripts/config --file "$CONFIG" \
+            --enable BPF \
+            --enable BPF_SYSCALL \
+            --enable BPF_JIT
+
+          # These are optional/conditional on this kernel tree.
+          # Only enable them when the symbol actually exists.
+          if grep -q '^config BPF_EVENTS' init/Kconfig kernel/Kconfig 2>/dev/null || \
+             grep -Rqs '^config BPF_EVENTS' kernel include; then
+            ./scripts/config --file "$CONFIG" --enable BPF_EVENTS || true
+          fi
+
+          if grep -Rqs '^config CGROUP_BPF' .; then
+            ./scripts/config --file "$CONFIG" --enable CGROUP_BPF || true
+          fi
+
+          # --------------------------------------------------------
+          # KernelSU
+          # --------------------------------------------------------
+
+          if [ "${{ github.event.inputs.kernelsu }}" = "true" ]; then
+
+            if grep -Rqs '^config KSU' KernelSU; then
+              ./scripts/config --file "$CONFIG" --enable KSU
+            fi
+
+            # KernelSU v0.9.5 non-GKI integration uses kprobes.
+            ./scripts/config --file "$CONFIG" \
+              --enable KPROBES \
+              --enable HAVE_KPROBES \
+              --enable KPROBE_EVENTS || true
+
+          fi
+
+          # --------------------------------------------------------
+          # Resolve dependencies
+          # --------------------------------------------------------
+
+          make \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            O="$GITHUB_WORKSPACE/out" \
+            olddefconfig
+
+          echo
+          echo "========== BPF CONFIG =========="
+
+          grep -E \
+            '^(CONFIG_BPF|CONFIG_BPF_SYSCALL|CONFIG_BPF_JIT|CONFIG_BPF_EVENTS|CONFIG_CGROUP_BPF)=' \
+            "$CONFIG" || true
+
+          echo
+          echo "========== KSU CONFIG =========="
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_KPROBES|CONFIG_HAVE_KPROBES|CONFIG_KPROBE_EVENTS)=' \
+            "$CONFIG" || true
+
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
+      - name: Build kernel
+        run: |
+          set -e
+
+          cd "$KERNEL_DIR"
+
           export ARCH=arm64
           export SUBARCH=arm64
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
 
-          # Clean and compile
-          make O=out clean
-          make O=out mrproper
-          make O=out "${{ steps.detect.outputs.defconfig }}"
-          make -j"$(nproc --all)" O=out
+          # LLVM is used for the cross compilation.
+          export LLVM=1
+          export LLVM_IAS=1
 
-      - name: Package with AnyKernel3
+          echo "Starting kernel build..."
+
+          make \
+            -j"$(nproc --all)" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            O="$GITHUB_WORKSPACE/out" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image.gz \
+            dtbs \
+            modules
+
+      # ------------------------------------------------------------
+      # Verify output
+      # ------------------------------------------------------------
+      - name: Verify kernel output
         run: |
-          cd "$GITHUB_WORKSPACE"
+          set -e
 
-          # Verify compilation output exists dynamically
-          if [ -f "source/out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp source/out/arch/arm64/boot/Image.gz-dtb "$GITHUB_WORKSPACE/Image.gz-dtb"
-            export KERN_FILE="$GITHUB_WORKSPACE/Image.gz-dtb"
-          elif [ -f "source/out/arch/arm64/boot/Image.gz" ]; then
-            cp source/out/arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/Image.gz"
-            export KERN_FILE="$GITHUB_WORKSPACE/Image.gz"
-          else
-            echo "::error:: Compilation output target not found! Build failed."
+          echo "========== Kernel output =========="
+
+          find out/arch/arm64/boot \
+            -maxdepth 3 \
+            -type f \
+            -print | sort
+
+          if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "::error::Image.gz was not generated."
             exit 1
           fi
 
-          # Clone packaging repository
-          git clone --depth=1 -b "${{ env.ANYKERNEL_BRANCH }}" "https://github.com/${{ env.ANYKERNEL_REPO }}.git" anykernel
-          cp "$KERN_FILE" anykernel/
+          echo
+          echo "Image.gz successfully built."
 
-          # Configure basic installation parameters inside anykernel script layout
-          cd anykernel
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's/block=\/dev\/block\/platform\/omap\/omap_hsmmc.0\/by-name\/boot;/block=auto;/g' anykernel.sh
+      # ------------------------------------------------------------
+      # Collect artifacts
+      # ------------------------------------------------------------
+      - name: Prepare artifacts
+        run: |
+          set -e
 
-          # Generate flashable zip archive artifact
-          zip -r9 ../Infinix_Zero5G_2023_Kernel.zip * -x .git* README.md
+          mkdir -p artifacts
 
-      - name: Upload Flashable Kernel Zip
+          # Kernel
+          cp out/arch/arm64/boot/Image.gz \
+            artifacts/Image.gz
+
+          # Config
+          cp out/.config \
+            artifacts/kernel.config
+
+          # Kernel release
+          if [ -f out/include/config/kernel.release ]; then
+            cp out/include/config/kernel.release \
+              artifacts/kernel.release
+          fi
+
+          # DTBs
+          if [ -d out/arch/arm64/boot/dts ]; then
+            find out/arch/arm64/boot/dts \
+              -type f \
+              -name '*.dtb' \
+              -exec cp {} artifacts/ \;
+          fi
+
+          # DTBO if generated
+          if [ -d out/arch/arm64/boot/dts ]; then
+            find out/arch/arm64/boot/dts \
+              -type f \
+              -name '*.dtbo' \
+              -exec cp {} artifacts/ \;
+          fi
+
+          # Save build information
+          {
+            echo "Device: Infinix X6815C"
+            echo "Architecture: arm64"
+            echo "KernelSU: $KSU_VERSION"
+            echo "BPF: enabled"
+            echo "Build date: $(date -u)"
+            echo "Kernel version:"
+            cat artifacts/kernel.release 2>/dev/null || true
+          } > artifacts/BUILD_INFO.txt
+
+          echo
+          echo "========== ARTIFACTS =========="
+
+          ls -lah artifacts
+
+      # ------------------------------------------------------------
+      # Upload
+      # ------------------------------------------------------------
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Infinix-Zero5G-Kernel
-          path: Infinix_Zero5G_2023_Kernel.zip
+          name: X6815C-KernelSU-BPF
+          path: artifacts/
+          if-no-files-found: error
