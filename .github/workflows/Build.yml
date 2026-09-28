@@ -1,21 +1,12 @@
 name: Build Infinix X6815C Kernel with KernelSU & BPF
 
 on:
-  workflow_dispatch: # Allows you to manually click "Run workflow" from the GitHub Actions tab
+  workflow_dispatch: # Allows you to manually click "Run workflow" from the Actions tab
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -29,20 +20,19 @@ jobs:
         run: |
           mkdir toolchains
           cd toolchains
-          # Using Proton Clang which bundles everything needed for standalone cross-compilation
+          # Clones Proton Clang which bundles arm64 and arm Cross-Compilers inside a single repo
           git clone --depth=1 https://github.com clang
 
       - name: Setup KernelSU
         run: |
           cd kernel-source
-          # Integrate KernelSU directly via their official setup script
+          # Integrate KernelSU directly via their official installation script
           curl -LSs "https://githubusercontent.com" | bash -s main
 
       - name: Patch BPF Configurations
         run: |
           cd kernel-source
-          # Infinix X6815C config file usually resides in arch/arm64/configs/
-          # Replace 'vendor/x6815c_defconfig' with your exact defconfig name if it differs
+          # Config directory check. Change 'vendor/x6815c_defconfig' if your exact defconfig name differs
           TARGET_DEFCONFIG="arch/arm64/configs/vendor/x6815c_defconfig"
           
           echo "Appending BPF configurations to $TARGET_DEFCONFIG..."
@@ -63,10 +53,10 @@ jobs:
         run: |
           cd kernel-source
           
-          # Setup paths to toolchain
+          # Add the cloned Clang bin directory directly to path
           export PATH=$(pwd)/../toolchains/clang/bin:$PATH
           
-          # Environment variables
+          # Target build flags
           export ARCH=arm64
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
@@ -75,18 +65,18 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # 1. Regenerate defconfig
+          # 1. Generate configuration from defconfig
           make O=out vendor/x6815c_defconfig
           
-          # 2. Build the kernel
+          # 2. Build the target image binaries
           make -j$(nproc --all) O=out
 
       - name: Package Output (AnyKernel3)
         run: |
-          # Clone a generic AnyKernel3 flashable template
+          # Clone standard flashing environment zip layout template
           git clone --depth=1 https://github.com AnyKernel3
           
-          # Target binary search
+          # Build target directory verification loop
           if [ -f "kernel-source/out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp kernel-source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
           elif [ -f "kernel-source/out/arch/arm64/boot/Image.gz" ]; then
@@ -95,7 +85,7 @@ jobs:
             cp kernel-source/out/arch/arm64/boot/Image AnyKernel3/Image
           fi
           
-          # Zip it up
+          # Create compressed recovery installer image archive
           cd AnyKernel3
           zip -r ../Infinix_X6815C_KernelSU_BPF.zip *
 
