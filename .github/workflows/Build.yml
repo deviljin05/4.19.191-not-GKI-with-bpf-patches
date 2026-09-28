@@ -12,7 +12,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout the repository containing this workflow
+      # Checkout build repository
       # ============================================================
       - name: Checkout build repository
         uses: actions/checkout@v4
@@ -20,86 +20,22 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. Clone actual kernel source
-      #
-      # IMPORTANT:
-      # The build repository does NOT contain the kernel source.
-      # We clone the source repository separately.
+      # Checkout actual X6815C kernel source
       # ============================================================
       - name: Checkout X6815C kernel source
         run: |
-          set -e
+          set -eux
+
+          rm -rf kernel-source
 
           git clone --depth=1 \
             https://github.com/rag12ghu-design/android_device_infinix_X6815C-kernel.git \
             kernel-source
 
       # ============================================================
-      # 3. Locate the real kernel root
+      # Install dependencies
       # ============================================================
-      - name: Locate kernel source
-        id: kernel
-        shell: bash
-        run: |
-          set -e
-
-          echo "========== SOURCE REPOSITORY =========="
-          find kernel-source -maxdepth 3 -type d | sort
-
-          echo
-          echo "========== SEARCHING FOR KERNEL TREE =========="
-
-          KERNEL_DIR=""
-
-          # Search for kernel-headers first.
-          while IFS= read -r dir; do
-            if [ -f "$dir/Makefile" ] && \
-               [ -d "$dir/arch" ] && \
-               [ -d "$dir/drivers" ] && \
-               [ -d "$dir/include" ] && \
-               [ -d "$dir/kernel" ] && \
-               [ -d "$dir/mm" ] && \
-               [ -d "$dir/net" ]; then
-              KERNEL_DIR="$dir"
-              break
-            fi
-          done < <(find kernel-source -type d -name "kernel-headers" -print)
-
-          # Fallback: search every directory.
-          if [ -z "$KERNEL_DIR" ]; then
-            while IFS= read -r dir; do
-              if [ -f "$dir/Makefile" ] && \
-                 [ -d "$dir/arch" ] && \
-                 [ -d "$dir/drivers" ] && \
-                 [ -d "$dir/include" ] && \
-                 [ -d "$dir/kernel" ] && \
-                 [ -d "$dir/mm" ] && \
-                 [ -d "$dir/net" ]; then
-                KERNEL_DIR="$dir"
-                break
-              fi
-            done < <(find kernel-source -type d -print)
-          fi
-
-          if [ -z "$KERNEL_DIR" ]; then
-            echo "::error::No complete kernel source tree was found."
-            echo
-            echo "Files in repository:"
-            find kernel-source -maxdepth 4 -type f | sort
-            exit 1
-          fi
-
-          echo "========================================"
-          echo "Kernel source found:"
-          echo "$KERNEL_DIR"
-          echo "========================================"
-
-          echo "kernel_dir=$KERNEL_DIR" >> "$GITHUB_OUTPUT"
-
-      # ============================================================
-      # 4. Install build dependencies
-      # ============================================================
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
 
@@ -126,9 +62,100 @@ jobs:
             zip
 
       # ============================================================
-      # 5. Verify source
+      # Locate kernel source
       # ============================================================
-      - name: Verify kernel source
+      - name: Locate kernel source
+        id: kernel
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Repository structure"
+          echo "=========================================="
+
+          find kernel-source \
+            -maxdepth 2 \
+            -type d \
+            -print | sort
+
+          echo
+          echo "=========================================="
+          echo "Locating kernel-headers"
+          echo "=========================================="
+
+          KERNEL_DIR=""
+
+          # Expected location.
+          if [ -d "kernel-source/kernel-headers" ]; then
+            KERNEL_DIR="kernel-source/kernel-headers"
+          fi
+
+          # Fallback.
+          if [ -z "$KERNEL_DIR" ]; then
+            KERNEL_DIR="$(
+              find kernel-source \
+                -type d \
+                -name kernel-headers \
+                -print \
+                -quit
+            )"
+          fi
+
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "::error::kernel-headers directory was not found."
+            exit 1
+          fi
+
+          echo "Kernel directory:"
+          echo "$KERNEL_DIR"
+
+          echo
+          echo "=========================================="
+          echo "Validating kernel source"
+          echo "=========================================="
+
+          REQUIRED_ITEMS="
+          Makefile
+          arch
+          block
+          crypto
+          drivers
+          fs
+          include
+          init
+          ipc
+          kernel
+          lib
+          mm
+          net
+          scripts
+          security
+          "
+
+          for item in $REQUIRED_ITEMS; do
+            if [ ! -e "$KERNEL_DIR/$item" ]; then
+              echo "::error::Missing kernel item: $item"
+              exit 1
+            fi
+          done
+
+          echo "Kernel source validation successful."
+
+          echo
+          echo "Ignoring:"
+          echo "  vendor-modules/"
+          echo "  prebuilt .ko files"
+          echo "  existing Image.gz"
+          echo "  existing dtbo.img"
+
+          echo
+          echo "kernel_dir=$KERNEL_DIR" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # Kernel version
+      # ============================================================
+      - name: Check kernel version
         run: |
           set -e
 
@@ -136,48 +163,15 @@ jobs:
 
           cd "$KERNEL_DIR"
 
-          echo "Kernel root:"
-          pwd
-
-          echo
           echo "Kernel version:"
           make kernelversion || true
 
-          echo
-          echo "Checking kernel directories..."
-
-          for d in \
-            arch \
-            block \
-            crypto \
-            drivers \
-            fs \
-            include \
-            init \
-            ipc \
-            kernel \
-            lib \
-            mm \
-            net \
-            scripts \
-            security
-          do
-            if [ ! -d "$d" ]; then
-              echo "::error::Missing directory: $d"
-              exit 1
-            fi
-          done
-
-          test -f Makefile
-
-          echo
-          echo "Kernel source verification PASSED."
-
       # ============================================================
-      # 6. Find ARM64 defconfig
+      # Find ARM64 defconfig
       # ============================================================
-      - name: Find device defconfig
+      - name: Find defconfig
         id: config
+        shell: bash
         run: |
           set -e
 
@@ -188,19 +182,20 @@ jobs:
           CONFIG_DIR="arch/arm64/configs"
 
           if [ ! -d "$CONFIG_DIR" ]; then
-            echo "::error::ARM64 config directory missing."
+            echo "::error::arch/arm64/configs missing."
             exit 1
           fi
 
-          echo "Available candidate configs:"
+          echo "Candidate device configs:"
+          echo
 
           find "$CONFIG_DIR" \
             -type f \
             \( \
               -iname '*x6815*' \
               -o -iname '*mt6877*' \
-              -o -iname '*1080*' \
               -o -iname '*dimensity*' \
+              -o -iname '*1080*' \
             \) \
             -print | sort
 
@@ -210,27 +205,30 @@ jobs:
               \( \
                 -iname '*x6815*' \
                 -o -iname '*mt6877*' \
-                -o -iname '*1080*' \
                 -o -iname '*dimensity*' \
+                -o -iname '*1080*' \
               \) \
               -print
           "
 
           if [ -z "$MATCHES" ]; then
-            echo "::error::No device-specific defconfig found."
+            echo "::error::No X6815C/MT6877 defconfig found."
+
             echo
-            echo "All available defconfigs:"
-            find "$CONFIG_DIR" -type f -maxdepth 3 -print | sort
+            echo "All available configs:"
+            find "$CONFIG_DIR" \
+              -type f \
+              -maxdepth 3 \
+              -print | sort
+
             exit 1
           fi
 
           COUNT=$(printf '%s\n' "$MATCHES" | grep -c .)
 
-          if [ "$COUNT" -ne 1 ]; then
+          if [ "$COUNT" -gt 1 ]; then
             echo "::error::Multiple possible defconfigs found:"
             echo "$MATCHES"
-            echo
-            echo "Automatic selection stopped."
             exit 1
           fi
 
@@ -243,18 +241,21 @@ jobs:
           echo "defconfig=$DEFCONFIG" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 7. Prepare output
+      # Prepare output
       # ============================================================
       - name: Prepare output
         run: |
           set -e
+
           rm -rf out artifacts
-          mkdir -p out artifacts
+
+          mkdir -p out
+          mkdir -p artifacts
 
       # ============================================================
-      # 8. Generate original configuration
+      # Generate original config
       # ============================================================
-      - name: Generate kernel config
+      - name: Generate kernel configuration
         run: |
           set -e
 
@@ -262,6 +263,9 @@ jobs:
           DEFCONFIG="${{ steps.config.outputs.defconfig }}"
 
           cd "$KERNEL_DIR"
+
+          echo "Building config:"
+          echo "$DEFCONFIG"
 
           make \
             ARCH=arm64 \
@@ -272,9 +276,7 @@ jobs:
           test -f "$GITHUB_WORKSPACE/out/.config"
 
       # ============================================================
-      # 9. Install KernelSU
-      #
-      # v0.9.5 is used for this old/non-GKI style kernel.
+      # KernelSU v0.9.5
       # ============================================================
       - name: Integrate KernelSU
         run: |
@@ -287,7 +289,7 @@ jobs:
           echo "Installing KernelSU v0.9.5..."
 
           curl -LSs \
-            "https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh" \
+            https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh \
             | bash
 
           if [ ! -d KernelSU ]; then
@@ -295,10 +297,10 @@ jobs:
             exit 1
           fi
 
-          echo "KernelSU integration successful."
+          echo "KernelSU installed."
 
       # ============================================================
-      # 10. Enable BPF + KernelSU config
+      # Configure BPF + KernelSU
       # ============================================================
       - name: Configure BPF and KernelSU
         run: |
@@ -309,38 +311,52 @@ jobs:
 
           cd "$KERNEL_DIR"
 
-          echo "Enabling BPF..."
+          echo "=========================================="
+          echo "Enabling BPF"
+          echo "=========================================="
 
-          ./scripts/config --file "$CONFIG" \
+          ./scripts/config \
+            --file "$CONFIG" \
             --enable BPF \
             --enable BPF_SYSCALL \
             --enable BPF_JIT
 
-          # Optional BPF features, only when supported by this tree.
-
+          # Optional BPF events.
           if grep -Rqs '^config BPF_EVENTS' \
-              kernel include drivers; then
-            ./scripts/config --file "$CONFIG" \
+              kernel \
+              include \
+              drivers; then
+
+            ./scripts/config \
+              --file "$CONFIG" \
               --enable BPF_EVENTS || true
           fi
 
+          # Optional cgroup BPF.
           if grep -Rqs '^config CGROUP_BPF' .; then
-            ./scripts/config --file "$CONFIG" \
+            ./scripts/config \
+              --file "$CONFIG" \
               --enable CGROUP_BPF || true
           fi
 
           echo
-          echo "Enabling KernelSU..."
+          echo "=========================================="
+          echo "Enabling KernelSU"
+          echo "=========================================="
 
           if grep -Rqs '^config KSU' KernelSU; then
-            ./scripts/config --file "$CONFIG" \
+            ./scripts/config \
+              --file "$CONFIG" \
               --enable KSU
           fi
 
-          ./scripts/config --file "$CONFIG" \
+          # Non-GKI KernelSU dependencies.
+          ./scripts/config \
+            --file "$CONFIG" \
             --enable KPROBES || true
 
-          ./scripts/config --file "$CONFIG" \
+          ./scripts/config \
+            --file "$CONFIG" \
             --enable KPROBE_EVENTS || true
 
           echo
@@ -353,21 +369,25 @@ jobs:
             olddefconfig
 
           echo
-          echo "========== FINAL BPF CONFIG =========="
+          echo "=========================================="
+          echo "BPF CONFIG"
+          echo "=========================================="
 
           grep -E \
             '^(CONFIG_BPF|CONFIG_BPF_SYSCALL|CONFIG_BPF_JIT|CONFIG_BPF_EVENTS|CONFIG_CGROUP_BPF)=' \
             "$CONFIG" || true
 
           echo
-          echo "========== FINAL KSU CONFIG =========="
+          echo "=========================================="
+          echo "KERNELSU CONFIG"
+          echo "=========================================="
 
           grep -E \
             '^(CONFIG_KSU|CONFIG_KPROBES|CONFIG_KPROBE_EVENTS)=' \
             "$CONFIG" || true
 
       # ============================================================
-      # 11. Build kernel
+      # Build kernel
       # ============================================================
       - name: Build kernel
         run: |
@@ -377,9 +397,9 @@ jobs:
 
           cd "$KERNEL_DIR"
 
-          echo "========================================"
-          echo "Starting ARM64 kernel build"
-          echo "========================================"
+          echo "=========================================="
+          echo "Building X6815C kernel"
+          echo "=========================================="
 
           make \
             -j"$(nproc --all)" \
@@ -393,9 +413,9 @@ jobs:
             modules
 
       # ============================================================
-      # 12. Verify Image
+      # Verify
       # ============================================================
-      - name: Verify kernel
+      - name: Verify build
         run: |
           set -e
 
@@ -407,32 +427,39 @@ jobs:
           fi
 
           echo
-          echo "Kernel built successfully:"
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
           ls -lh "$IMAGE"
 
       # ============================================================
-      # 13. Collect DTBs
+      # Collect artifacts
       # ============================================================
-      - name: Collect kernel artifacts
+      - name: Collect artifacts
         run: |
           set -e
 
           mkdir -p artifacts
 
+          # Kernel image.
           cp \
             out/arch/arm64/boot/Image.gz \
             artifacts/Image.gz
 
+          # Final config.
           cp \
             out/.config \
             artifacts/kernel.config
 
+          # Kernel release.
           if [ -f out/include/config/kernel.release ]; then
             cp \
               out/include/config/kernel.release \
               artifacts/kernel.release
           fi
 
+          # DTBs.
           if [ -d out/arch/arm64/boot/dts ]; then
             find out/arch/arm64/boot/dts \
               -type f \
@@ -440,6 +467,7 @@ jobs:
               -exec cp {} artifacts/ \;
           fi
 
+          # DTBOs generated by build, if any.
           if [ -d out/arch/arm64/boot/dts ]; then
             find out/arch/arm64/boot/dts \
               -type f \
@@ -447,23 +475,39 @@ jobs:
               -exec cp {} artifacts/ \;
           fi
 
-          cat > artifacts/BUILD_INFO.txt <<EOF
-          Device: Infinix X6815C
-          Architecture: ARM64
-          KernelSU: v0.9.5
-          BPF: enabled
-          Build date: $(date -u)
-          Kernel release: $(cat out/include/config/kernel.release 2>/dev/null || echo unknown)
-          EOF
+          # Preserve original vendor modules.
+          if [ -d kernel-source/vendor-modules ]; then
+            mkdir -p artifacts/vendor-modules
+
+            cp \
+              kernel-source/vendor-modules/*.ko \
+              artifacts/vendor-modules/ \
+              2>/dev/null || true
+          fi
+
+          # Build information.
+          {
+            echo "Device: Infinix X6815C"
+            echo "Architecture: ARM64"
+            echo "KernelSU: v0.9.5"
+            echo "BPF: enabled"
+            echo "Build date: $(date -u)"
+            echo "Kernel release: $(cat out/include/config/kernel.release 2>/dev/null || echo unknown)"
+          } > artifacts/BUILD_INFO.txt
 
           echo
-          echo "========== ARTIFACTS =========="
-          ls -lah artifacts
+          echo "=========================================="
+          echo "ARTIFACTS"
+          echo "=========================================="
+
+          find artifacts \
+            -type f \
+            -exec ls -lh {} \;
 
       # ============================================================
-      # 14. Upload
+      # Upload
       # ============================================================
-      - name: Upload kernel
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: X6815C-4.19-KernelSU-BPF
