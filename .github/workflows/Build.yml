@@ -108,6 +108,17 @@ jobs:
             git clone --depth=1 "$KREPO" src
           fi
 
+      - name: Full repo inventory (diagnostic)
+        run: |
+          echo "== Every file in the repo (path + size) =="
+          find src -path src/.git -prune -o -type f -printf '%10s  %p\n' | sort -k2
+          echo
+          echo "== Any .c file anywhere (proof of real source vs headers-only) =="
+          find src -path src/.git -prune -o -name '*.c' -print | sort
+          echo
+          echo "== Any top-level Makefile/Kconfig/Kbuild anywhere =="
+          find src -path src/.git -prune -o \( -name 'Makefile' -o -name 'Kconfig' -o -name 'Kbuild' \) -print | sort
+
           if [ -n "$KSUBDIR" ]; then
             KDIR="src/$KSUBDIR"
           else
