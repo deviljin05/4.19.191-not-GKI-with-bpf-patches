@@ -75,15 +75,22 @@ jobs:
           cd kernel
           echo "Commit: $(git log -1 --format='%h %s')"
 
-      - name: Ensure KernelSU is removed
+      - name: Ensure KernelSU is fully removed
         working-directory: kernel
         run: |
-          # Agar pichle kisi run se drivers/kernelsu reh gaya hai, toh usko delete karo
+          # 1. Remove the directory
           if [ -d "drivers/kernelsu" ]; then
             echo "Removing leftover KernelSU drivers..."
             rm -rf drivers/kernelsu
-            # Makefile se bhi entry hatao agar hai
-            sed -i '/kernelsu/d' drivers/Makefile
+          fi
+          
+          # 2. Remove the Makefile entry
+          sed -i '/kernelsu/d' drivers/Makefile
+          
+          # 3. Remove the Kconfig entry (This fixes the current error)
+          if grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+            echo "Removing KernelSU entry from drivers/Kconfig..."
+            sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           fi
 
       - name: Resolve defconfig
@@ -188,8 +195,6 @@ jobs:
           ccache -M 5G
           START=$(date +%s)
           
-          # MediaTek WLAN Makefile reads WIFI_HIF and MTK_COMBO_CHIP from environment, NOT Kconfig.
-          # Passing them here explicitly fixes the "Unsuppoted HIF=!!" error.
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
