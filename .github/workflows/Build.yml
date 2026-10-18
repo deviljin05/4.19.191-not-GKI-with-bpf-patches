@@ -61,37 +61,35 @@ jobs:
             git clone --depth=1 "$REPO" kernel
           fi
 
-      - name: Hard-Fix Source (KernelSU & WLAN)
+      - name: Aggressive Vendor Fixes
         working-directory: kernel
         run: |
           echo "=========================================="
-          echo "🔨 APPLYING AUTO-FIXES TO SOURCE TREE..."
+          echo "🔨 APPLYING HARD BYPASSES FOR VENDOR CODE..."
           echo "=========================================="
           
-          # 1. DISABLE KERNELSU COMPLETELY (Remove from Makefile/Kconfig)
-          echo "🔥 Removing KernelSU from build system..."
-          # Remove from drivers/Kconfig
-          sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
-          # Remove from drivers/Makefile
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          # Remove from top-level Makefile
-          sed -i '/kernelsu/d' Makefile || true
-          
-          # Physically remove the folder to prevent compile errors
+          # 1. KILL KERNELSU (Prevent path_umount issues)
           rm -rf drivers/kernelsu
+          sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
+          sed -i '/kernelsu/d' drivers/Makefile || true
+          sed -i '/kernelsu/d' Makefile || true
 
           # 2. FIX WLAN HIF ERROR (Direct Makefile Edit)
-          WLAN_DIR="drivers/misc/mediatek/connectivity/wlan/core/gen4m"
-          WLAN_MK="$WLAN_DIR/Makefile"
+          WLAN_MK="drivers/misc/mediatek/connectivity/wlan/core/gen4m/Makefile"
           if [ -f "$WLAN_MK" ]; then
-            echo "📡 Patching WLAN Makefile: Setting HIF=sdio directly..."
-            # Force set HIF in the Makefile itself
             sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
             sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
             sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
-            # Remove the error stop line if it exists
             sed -i '/Unsuppoted HIF/d' "$WLAN_MK" || true
-            sed -i '/WIFI_HIF.*error/d' "$WLAN_MK" || true
+          fi
+
+          # 3. FIX BLUETOOTH ERROR (Bypass the broken BT driver)
+          # The BT driver is failing due to missing CONNAC20_CHIPID macros.
+          BT_MAKEFILE="drivers/misc/mediatek/connectivity/bt/mt66xx/btif/Makefile"
+          if [ -f "$BT_MAKEFILE" ]; then
+            echo "📡 Patching BT Makefile to bypass compile errors..."
+            # Comment out the object file that is failing
+            sed -i 's/^obj-.*btmtk_dbg.o/# &/' "$BT_MAKEFILE" || true
           fi
 
       - name: Resolve defconfig
@@ -132,6 +130,7 @@ jobs:
         run: |
           : > ci.config
           
+          # Disable problematic vendor drivers
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -143,6 +142,9 @@ jobs:
           CONFIG_MTK_COMBO_WIFI_HIF=sdio
           CONFIG_MTK_COMBO_CHIP=MT6632
           CONFIG_MODULES=y
+          # Disable BT to prevent compile failure
+          CONFIG_MTK_COMBO_BT=n
+          CONFIG_MTK_BTIF=n
           EOF
 
           if [ "$BPF" = "true" ]; then
@@ -173,10 +175,11 @@ jobs:
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
           
-          # Double-Force WLAN HIF in ENV as well
+          # Force envs
           export WIFI_HIF=sdio
           export HIF=sdio
           export MTK_COMBO_CHIP=MT6632
+          export MTK_CONNAC20_CHIPID=6877
           
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
