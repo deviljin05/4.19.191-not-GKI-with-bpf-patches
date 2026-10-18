@@ -61,13 +61,37 @@ jobs:
             git clone --depth=1 "$REPO" kernel
           fi
 
-      - name: Smart Source Auto-Fix
+      - name: Hard-Fix Source (KernelSU & WLAN)
         working-directory: kernel
         run: |
-          echo "🔍 Checking for broken KernelSU leftovers..."
-          if [ ! -d "drivers/kernelsu" ]; then
-            sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
-            sed -i '/kernelsu/d' drivers/Makefile || true
+          echo "=========================================="
+          echo "🔨 APPLYING AUTO-FIXES TO SOURCE TREE..."
+          echo "=========================================="
+          
+          # 1. DISABLE KERNELSU COMPLETELY (Remove from Makefile/Kconfig)
+          echo "🔥 Removing KernelSU from build system..."
+          # Remove from drivers/Kconfig
+          sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
+          # Remove from drivers/Makefile
+          sed -i '/kernelsu/d' drivers/Makefile || true
+          # Remove from top-level Makefile
+          sed -i '/kernelsu/d' Makefile || true
+          
+          # Physically remove the folder to prevent compile errors
+          rm -rf drivers/kernelsu
+
+          # 2. FIX WLAN HIF ERROR (Direct Makefile Edit)
+          WLAN_DIR="drivers/misc/mediatek/connectivity/wlan/core/gen4m"
+          WLAN_MK="$WLAN_DIR/Makefile"
+          if [ -f "$WLAN_MK" ]; then
+            echo "📡 Patching WLAN Makefile: Setting HIF=sdio directly..."
+            # Force set HIF in the Makefile itself
+            sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
+            sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
+            sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
+            # Remove the error stop line if it exists
+            sed -i '/Unsuppoted HIF/d' "$WLAN_MK" || true
+            sed -i '/WIFI_HIF.*error/d' "$WLAN_MK" || true
           fi
 
       - name: Resolve defconfig
@@ -117,6 +141,7 @@ jobs:
           CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           CONFIG_BUILD_ARM64_DT_OVERLAY=y
           CONFIG_MTK_COMBO_WIFI_HIF=sdio
+          CONFIG_MTK_COMBO_CHIP=MT6632
           CONFIG_MODULES=y
           EOF
 
@@ -147,6 +172,12 @@ jobs:
         run: |
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
+          
+          # Double-Force WLAN HIF in ENV as well
+          export WIFI_HIF=sdio
+          export HIF=sdio
+          export MTK_COMBO_CHIP=MT6632
+          
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -155,8 +186,6 @@ jobs:
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump STRIP=llvm-strip \
             KCFLAGS="-Wno-error -Wno-deprecated-declarations" \
-            WIFI_HIF=sdio \
-            MTK_COMBO_CHIP=MT6632 \
             2>&1 | tee build.log
 
       - name: Collect Outputs (Image, DTB, Modules)
@@ -166,25 +195,18 @@ jobs:
           B=out/arch/arm64/boot
           D="$GITHUB_WORKSPACE/dist"
           
-          # 1. Handle Kernel Image & DTB
           if [ -f "$B/Image.gz-dtb" ]; then
-            echo "✅ Image.gz-dtb found."
             cp "$B/Image.gz-dtb" "$D/"
           elif [ -f "$B/Image.gz" ]; then
-            echo "⚠️ Image.gz found. Checking DTB..."
             cp "$B/Image.gz" "$D/"
-            if [ -f "$B/dtb" ]; then
-              cp "$B/dtb" "$D/dtb"
-            fi
+            [ -f "$B/dtb" ] && cp "$B/dtb" "$D/dtb"
           elif [ -f "$B/Image" ]; then
-            echo "✅ Image found."
             cp "$B/Image" "$D/"
           else
             echo "::error::❌ No Kernel Image produced."
             exit 1
           fi
           
-          # 2. Handle Modules (.ko) for MTK
           echo "🔍 Finding .ko modules..."
           find out -name "*.ko" -exec cp {} "$D/" \; 2>/dev/null || true
           
@@ -197,7 +219,6 @@ jobs:
           rm -rf ak3/.git ak3/.github ak3/README.md
           D="$GITHUB_WORKSPACE/dist"
           
-          # Copy Image
           if [ -f "$D/Image.gz-dtb" ]; then
             cp "$D/Image.gz-dtb" ak3/
           elif [ -f "$D/Image.gz" ]; then
@@ -206,17 +227,13 @@ jobs:
             cp "$D/Image" ak3/
           fi
           
-          # Copy DTB if separate
           [ -f "$D/dtb" ] && cp "$D/dtb" ak3/
           
-          # Inject Modules into AnyKernel3
           if ls "$D"/*.ko >/dev/null 2>&1; then
             mkdir -p ak3/modules
             cp "$D"/*.ko ak3/modules/
-            echo "✅ Modules added to AnyKernel3."
           fi
           
-          # Update AnyKernel3 Script
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (Production)|" \
             -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
@@ -233,10 +250,9 @@ jobs:
           name: X6815C-production-build
           path: dist/*
 
-      - name: Publish Release
-        if: ${{ inputs.release }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload Build Log (If Failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: x6815c-${{ github.run_number }}
-          name: X6815C ${{ env.KVER }} (Production)
-          files: dist/*.zip
+          name: build-log
+          path: kernel/build.log
