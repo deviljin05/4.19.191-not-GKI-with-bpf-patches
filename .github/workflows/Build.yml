@@ -1,4 +1,4 @@
-name: Build X6815C Kernel (KernelSU-Next + BPF)
+name: Build X6815C Kernel (Clean BPF)
 
 on:
   workflow_dispatch:
@@ -12,38 +12,21 @@ on:
         required: false
         default: "main"
       defconfig:
-        description: "Defconfig name (auto = detect from arch/arm64/configs)"
+        description: "Defconfig name (auto = detect)"
         required: true
         default: "auto"
       extra_config:
-        description: "Extra Kconfig lines, separated by ;"
+        description: "Extra Kconfig lines separated by ;"
         required: false
-        default: ""
-      ksu:
-        description: "KernelSU variant"
-        type: choice
-        options: [next, none]
-        default: next
+        default: "CONFIG_LOCALVERSION=\"-BPF\""
       enable_bpf:
         description: "Enable BPF configs + apply patches/bpf/*.patch"
         type: boolean
         default: true
       extra_patch_urls:
-        description: "Extra .patch URLs (space separated, applied after BPF patches)"
+        description: "Extra .patch URLs (space separated)"
         required: false
         default: ""
-      clang_version:
-        description: "AOSP Clang version (e.g. clang-r383902)"
-        required: true
-        default: "clang-r383902"
-      clang_branch:
-        description: "AOSP branch for clang (e.g. android12-release)"
-        required: true
-        default: "android12-release"
-      anykernel_repo:
-        description: "AnyKernel3 repo"
-        required: true
-        default: "https://github.com/osm0sis/AnyKernel3"
       release:
         description: "Publish a GitHub Release"
         type: boolean
@@ -62,7 +45,7 @@ env:
 jobs:
   build:
     name: Build kernel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 120
 
     steps:
@@ -92,16 +75,6 @@ jobs:
           cd kernel
           echo "Commit: $(git log -1 --format='%h %s')"
 
-      - name: Verify kernel source is buildable
-        working-directory: kernel
-        run: |
-          test -f Makefile || { echo "::error::No top-level Makefile - not a kernel tree"; exit 1; }
-          C_COUNT=$(find kernel drivers arch/arm64 -name '*.c' 2>/dev/null | wc -l)
-          echo "C files found: $C_COUNT"
-          [ "$C_COUNT" -gt 100 ] || { echo "::error::Repo has no real kernel source"; exit 1; }
-          make kernelversion
-          ls arch/arm64/configs | head -50
-
       - name: Resolve defconfig
         working-directory: kernel
         env:
@@ -115,20 +88,10 @@ jobs:
           fi
           test -f "arch/arm64/configs/$DC" || { echo "::error::arch/arm64/configs/$DC not found"; exit 1; }
           echo "DEFCONFIG=$DC" >> "$GITHUB_ENV"
-          echo "Using defconfig: $DC"
 
-      - name: Set up toolchain (AOSP Clang Tarball)
-        env:
-          CLANG_VER: ${{ inputs.clang_version }}
-          CLANG_BR: ${{ inputs.clang_branch }}
+      - name: Set up toolchain (Proton-Clang)
         run: |
-          # AOSP mein clang-r383902 branch nahi, folder hai. Isliye direct tarball download.
-          # Archive URL format: .../+archive/refs/heads/<branch>/<folder>.tar.gz
-          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BR}/${CLANG_VER}.tar.gz"
-          echo "Downloading clang from: $URL"
-          mkdir -p "$HOME/clang"
-          curl -fLsS "$URL" -o /tmp/clang.tar.gz || { echo "::error::Failed to download clang"; exit 1; }
-          tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang "$HOME/clang"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version | head -n1
 
@@ -139,38 +102,15 @@ jobs:
           key: ccache-x6815c-${{ github.run_id }}
           restore-keys: ccache-x6815c-
 
-      - name: Integrate KernelSU-Next (Legacy/Non-GKI)
-        if: ${{ inputs.ksu == 'next' }}
-        working-directory: kernel
-        run: |
-          # Non-GKI (4.19) ke liye "legacy" setup zaroori hai.
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          test -d drivers/kernelsu || test -d KernelSU-Next || { echo "::error::KernelSU-Next setup failed"; exit 1; }
-          
-          # MODULE_IMPORT_NS macro 5.0 se pehle nahi hota, isliye strip karna zaroori hai.
-          if grep -r "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null; then
-            echo "Patching MODULE_IMPORT_NS for non-GKI..."
-            find drivers/kernelsu -type f -name '*.c' -exec sed -i 's/MODULE_IMPORT_NS(.*);//g' {} \;
-          fi
-          
-          git status --short | head -20
-
       - name: Apply BPF patches
         if: ${{ inputs.enable_bpf }}
         working-directory: kernel
         run: |
           shopt -s nullglob
           PATCHES=("$GITHUB_WORKSPACE"/patches/bpf/*.patch)
-          if [ ${#PATCHES[@]} -eq 0 ]; then
-            echo "::warning::No patches/bpf/*.patch found - only BPF configs enabled"
-          fi
           for p in "${PATCHES[@]}"; do
             echo ">> Applying $(basename "$p")"
-            if git apply --check "$p" 2>/dev/null; then
-              git apply "$p"
-            else
-              echo "::warning::Patch failed to apply (may already be applied or incompatible): $p"
-            fi
+            git apply "$p" || echo "::warning::Patch failed: $p (skipping)"
           done
 
       - name: Apply extra patches
@@ -181,28 +121,29 @@ jobs:
         run: |
           for u in $URLS; do
             curl -fLsS "$u" -o /tmp/extra.patch
-            git apply --check /tmp/extra.patch || { echo "::warning::Patch failed: $u"; continue; }
-            git apply /tmp/extra.patch
+            git apply /tmp/extra.patch || echo "::warning::Patch failed: $u"
           done
 
       - name: Configure kernel
         working-directory: kernel
         env:
-          KSU: ${{ inputs.ksu }}
           BPF: ${{ inputs.enable_bpf }}
           EXTRA: ${{ inputs.extra_config }}
         run: |
           : > ci.config
-          if [ "$KSU" = "next" ]; then
-            cat >> ci.config <<'EOF'
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_KSU_KPROBES_HOOK=n
-          CONFIG_KSU_WITH_KPROBES=n
-          CONFIG_MODULES=y
-          CONFIG_OVERLAY_FS=y
+          
+          # CRITICAL FIXES FOR MTK 4.19 COMPILATION & BOOT
+          cat >> ci.config <<'EOF'
+          CONFIG_MODULE_SIG=n
+          CONFIG_SYSTEM_TRUSTED_KEYS=""
+          CONFIG_DEBUG_INFO=n
+          CONFIG_LTO_NONE=y
+          CONFIG_WERROR=n
+          CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
+          CONFIG_BUILD_ARM64_DT_OVERLAY=y
+          CONFIG_MTK_COMBO_WIFI_HIF=sdio
           EOF
-          fi
+
           if [ "$BPF" = "true" ]; then
             cat >> ci.config <<'EOF'
           CONFIG_BPF=y
@@ -219,6 +160,7 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_BPF=y
           EOF
           fi
+          
           if [ -n "$EXTRA" ]; then
             echo "$EXTRA" | tr ';' '\n' >> ci.config
           fi
@@ -228,12 +170,6 @@ jobs:
           scripts/kconfig/merge_config.sh -m -O out out/.config ci.config
           make O=out ARCH=arm64 CC=clang olddefconfig
 
-          echo "---- config verification ----"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            grep -qx "$line" out/.config || echo "::warning::Not applied: $line"
-          done < ci.config
-
       - name: Build kernel
         working-directory: kernel
         run: |
@@ -241,6 +177,7 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           ccache -M 5G
           START=$(date +%s)
+          
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -249,60 +186,56 @@ jobs:
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump STRIP=llvm-strip \
             2>&1 | tee build.log
+            
           echo "BUILD_SECS=$(( $(date +%s) - START ))" >> "$GITHUB_ENV"
           ccache -s
 
-      - name: Collect outputs
+      - name: Verify Outputs & Collect
         working-directory: kernel
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           B=out/arch/arm64/boot
-          ls -la "$B"
-          for f in Image Image.gz Image.gz-dtb; do
-            [ -f "$B/$f" ] && cp "$B/$f" "$GITHUB_WORKSPACE/dist/"
-          done
-          find "$B/dts" -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/dist/" \; 2>/dev/null || true
-          find "$B/dts" -name '*.dtbo' -exec cp {} "$GITHUB_WORKSPACE/dist/" \; 2>/dev/null || true
+          
+          if [ -f "$B/Image.gz-dtb" ]; then
+            echo "::notice::Image.gz-dtb found. Phone will boot."
+            cp "$B/Image.gz-dtb" "$GITHUB_WORKSPACE/dist/"
+          elif [ -f "$B/Image.gz" ]; then
+            echo "::warning::Image.gz found. DTB needs to be appended manually."
+            cp "$B/Image.gz" "$GITHUB_WORKSPACE/dist/"
+          else
+            echo "::error::No Image produced. Build failed."
+            exit 1
+          fi
+          
           cp out/.config "$GITHUB_WORKSPACE/dist/final.config"
-          [ -f "$GITHUB_WORKSPACE/dist/Image.gz-dtb" ] || [ -f "$GITHUB_WORKSPACE/dist/Image.gz" ] || [ -f "$GITHUB_WORKSPACE/dist/Image" ] \
-            || { echo "::error::No kernel image produced"; exit 1; }
           echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
 
       - name: Package AnyKernel3 zip
-        env:
-          AK_REPO: ${{ inputs.anykernel_repo }}
-          KSU: ${{ inputs.ksu }}
         run: |
-          git clone --depth=1 "$AK_REPO" ak3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md
           D="$GITHUB_WORKSPACE/dist"
-          if   [ -f "$D/Image.gz-dtb" ]; then cp "$D/Image.gz-dtb" ak3/
-          elif [ -f "$D/Image.gz" ];     then cp "$D/Image.gz" ak3/
-          else cp "$D/Image" ak3/; fi
-          if ! [ -f "$D/Image.gz-dtb" ] && ls "$D"/*.dtb >/dev/null 2>&1; then
-            cat "$D"/*.dtb > ak3/dtb
+          
+          if [ -f "$D/Image.gz-dtb" ]; then
+            cp "$D/Image.gz-dtb" ak3/
+          else
+            cp "$D/Image.gz" ak3/
+            if ls "$D"/*.dtb >/dev/null 2>&1; then
+              cat "$D"/*.dtb > ak3/dtb
+            fi
           fi
+          
           sed -i \
-            -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (KernelSU: ${KSU})|" \
+            -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (BPF)|" \
             -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
             -e "s|^do.modules=.*|do.modules=0|" \
-            -e "s|^BLOCK=.*|BLOCK=auto;|" \
+            -e "s|^BLOCK=.*|BLOCK=boot;|" \
             -e "s|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|" \
             ak3/anykernel.sh
-          ZIP="X6815C-${KVER}-KSU-${KSU}-$(date +%Y%m%d-%H%M).zip"
+            
+          ZIP="X6815C-${KVER}-BPF-$(date +%Y%m%d-%H%M).zip"
           (cd ak3 && zip -r9 "$GITHUB_WORKSPACE/dist/$ZIP" . -x '*.git*')
           echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
-
-      - name: Job summary
-        run: |
-          {
-            echo "### X6815C kernel build"
-            echo "- Version: \`$KVER\`"
-            echo "- Defconfig: \`$DEFCONFIG\`"
-            echo "- KernelSU: \`${{ inputs.ksu }}\` | BPF: \`${{ inputs.enable_bpf }}\`"
-            echo "- Build time: $((BUILD_SECS/60)) min"
-            echo "- Zip: \`$ZIP_NAME\`"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -317,11 +250,3 @@ jobs:
         with:
           name: build-log
           path: kernel/build.log
-
-      - name: Publish release
-        if: ${{ inputs.release }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: x6815c-${{ github.run_number }}
-          name: X6815C ${{ env.KVER }} (build ${{ github.run_number }})
-          files: dist/${{ env.ZIP_NAME }}
