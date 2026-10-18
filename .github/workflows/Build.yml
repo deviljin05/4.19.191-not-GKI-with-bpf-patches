@@ -15,6 +15,10 @@ on:
         description: "Defconfig name (auto = detect from arch/arm64/configs)"
         required: true
         default: "auto"
+      extra_config:
+        description: "Extra Kconfig lines, separated by ; (e.g. CONFIG_FOO=n;CONFIG_BAR=y)"
+        required: false
+        default: ""
       ksu:
         description: "KernelSU variant"
         type: choice
@@ -168,6 +172,7 @@ jobs:
         env:
           KSU: ${{ inputs.ksu }}
           BPF: ${{ inputs.enable_bpf }}
+          EXTRA: ${{ inputs.extra_config }}
         run: |
           : > ci.config
           if [ "$KSU" = "next" ]; then
@@ -196,11 +201,17 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_BPF=y
           EOF
           fi
+          if [ -n "$EXTRA" ]; then
+            echo "$EXTRA" | tr ';' '\n' >> ci.config
+          fi
           sed -i 's/^ *//' ci.config
 
           make O=out ARCH=arm64 CC=clang "$DEFCONFIG"
           scripts/kconfig/merge_config.sh -m -O out out/.config ci.config
           make O=out ARCH=arm64 CC=clang olddefconfig
+
+          echo "---- platform / wifi diagnostics ----"
+          grep -E 'CONFIG_MTK_PLATFORM|COMBO|WIFI_HIF|MTK_WLAN|CONNAC|CONFIG_WLAN' out/.config || true
 
           echo "---- config verification ----"
           while IFS= read -r line; do
