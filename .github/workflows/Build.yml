@@ -32,14 +32,14 @@ on:
         description: "Extra .patch URLs (space separated, applied after BPF patches)"
         required: false
         default: ""
-      clang_repo:
-        description: "Clang toolchain git repo"
-        required: true
-        default: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
-      clang_branch:
-        description: "Clang branch (e.g. clang-r383902 for 4.19 kernels)"
+      clang_version:
+        description: "AOSP Clang version (e.g. clang-r383902)"
         required: true
         default: "clang-r383902"
+      clang_branch:
+        description: "AOSP branch for clang (e.g. android12-release)"
+        required: true
+        default: "android12-release"
       anykernel_repo:
         description: "AnyKernel3 repo"
         required: true
@@ -117,12 +117,18 @@ jobs:
           echo "DEFCONFIG=$DC" >> "$GITHUB_ENV"
           echo "Using defconfig: $DC"
 
-      - name: Set up toolchain (AOSP Clang for 4.19)
+      - name: Set up toolchain (AOSP Clang Tarball)
         env:
-          CLANG_REPO: ${{ inputs.clang_repo }}
-          CLANG_BRANCH: ${{ inputs.clang_branch }}
+          CLANG_VER: ${{ inputs.clang_version }}
+          CLANG_BR: ${{ inputs.clang_branch }}
         run: |
-          git clone --depth=1 -b "$CLANG_BRANCH" "$CLANG_REPO" "$HOME/clang"
+          # AOSP mein clang-r383902 branch nahi, folder hai. Isliye direct tarball download.
+          # Archive URL format: .../+archive/refs/heads/<branch>/<folder>.tar.gz
+          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BR}/${CLANG_VER}.tar.gz"
+          echo "Downloading clang from: $URL"
+          mkdir -p "$HOME/clang"
+          curl -fLsS "$URL" -o /tmp/clang.tar.gz || { echo "::error::Failed to download clang"; exit 1; }
+          tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version | head -n1
 
@@ -137,11 +143,11 @@ jobs:
         if: ${{ inputs.ksu == 'next' }}
         working-directory: kernel
         run: |
-          # Use "legacy" setup for non-GKI kernels (4.19)
+          # Non-GKI (4.19) ke liye "legacy" setup zaroori hai.
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           test -d drivers/kernelsu || test -d KernelSU-Next || { echo "::error::KernelSU-Next setup failed"; exit 1; }
           
-          # Fix MODULE_IMPORT_NS macro missing on kernels < 5.0
+          # MODULE_IMPORT_NS macro 5.0 se pehle nahi hota, isliye strip karna zaroori hai.
           if grep -r "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null; then
             echo "Patching MODULE_IMPORT_NS for non-GKI..."
             find drivers/kernelsu -type f -name '*.c' -exec sed -i 's/MODULE_IMPORT_NS(.*);//g' {} \;
@@ -164,7 +170,6 @@ jobs:
               git apply "$p"
             else
               echo "::warning::Patch failed to apply (may already be applied or incompatible): $p"
-              # Don't exit here to allow build to continue if patch is optional
             fi
           done
 
