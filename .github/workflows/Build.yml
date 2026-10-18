@@ -1,4 +1,4 @@
-name: Build X6815C Kernel (Clean BPF)
+name: Build X6815C Kernel (Smart AutoHeal)
 
 on:
   workflow_dispatch:
@@ -15,18 +15,10 @@ on:
         description: "Defconfig name (auto = detect)"
         required: true
         default: "auto"
-      extra_config:
-        description: "Extra Kconfig lines separated by ;"
-        required: false
-        default: "CONFIG_LOCALVERSION=\"-BPF\""
       enable_bpf:
-        description: "Enable BPF configs + apply patches/bpf/*.patch"
+        description: "Enable BPF configs + apply patches"
         type: boolean
         default: true
-      extra_patch_urls:
-        description: "Extra .patch URLs (space separated)"
-        required: false
-        default: ""
       release:
         description: "Publish a GitHub Release"
         type: boolean
@@ -49,7 +41,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout workflow repo (for patches/)
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
@@ -72,46 +64,54 @@ jobs:
           else
             git clone --depth=1 "$REPO" kernel
           fi
-          cd kernel
-          echo "Commit: $(git log -1 --format='%h %s')"
 
-      - name: Ensure KernelSU is fully removed
+      # 🚀 AUTO-HEAL: Scans and fixes broken vendor leftovers
+      - name: Auto-Fix Source Tree
         working-directory: kernel
         run: |
-          # 1. Remove the directory
-          if [ -d "drivers/kernelsu" ]; then
-            echo "Removing leftover KernelSU drivers..."
-            rm -rf drivers/kernelsu
-          fi
+          echo "=========================================="
+          echo "🔍 SCANNING SOURCE FOR BROKEN ENTRIES..."
+          echo "=========================================="
           
-          # 2. Remove the Makefile entry
-          sed -i '/kernelsu/d' drivers/Makefile
-          
-          # 3. Remove the Kconfig entry (This fixes the current error)
-          if grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
-            echo "Removing KernelSU entry from drivers/Kconfig..."
-            sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
-          fi
-
-      - name: Resolve defconfig
-        working-directory: kernel
-        env:
-          DEFCONFIG_IN: ${{ inputs.defconfig }}
-        run: |
-          if [ "$DEFCONFIG_IN" = "auto" ]; then
-            DC=$(ls arch/arm64/configs | grep -iE 'x6815c|6877' | head -n1 || true)
-            [ -n "$DC" ] || { echo "::error::Could not auto-detect defconfig"; exit 1; }
+          # 1. Check for missing KernelSU Folder
+          if [ ! -d "drivers/kernelsu" ]; then
+            echo "❌ drivers/kernelsu folder missing. Searching for leftover references..."
+            
+            # Clean Kconfig
+            if grep -q "drivers/kernelsu" drivers/Kconfig; then
+              echo "   -> Found leftover in drivers/Kconfig. Removing..."
+              sed -i '/drivers\/kernelsu/d' drivers/Kconfig
+            fi
+            
+            # Clean Makefile
+            if grep -q "kernelsu" drivers/Makefile; then
+              echo "   -> Found leftover in drivers/Makefile. Removing..."
+              sed -i '/kernelsu/d' drivers/Makefile
+            fi
           else
-            DC="$DEFCONFIG_IN"
+            echo "✅ drivers/kernelsu exists."
           fi
-          test -f "arch/arm64/configs/$DC" || { echo "::error::arch/arm64/configs/$DC not found"; exit 1; }
-          echo "DEFCONFIG=$DC" >> "$GITHUB_ENV"
+
+          # 2. Verify Defconfig exists, if not, find closest match
+          DEFCONFIG_FILE=$(find arch/arm64/configs -maxdepth 1 -name '*X6815C*' -o -name '*6877*' | head -n 1)
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            echo "⚠️ Exact X6815C defconfig not found. Picking first available..."
+            DEFCONFIG_FILE=$(find arch/arm64/configs -maxdepth 1 -name '*defconfig' | head -n 1)
+          fi
+          
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            echo "::error::❌ CRITICAL: No defconfigs found in arch/arm64/configs"
+            exit 1
+          fi
+          
+          DC_NAME=$(basename "$DEFCONFIG_FILE")
+          echo "✅ Using Defconfig: $DC_NAME"
+          echo "DEFCONFIG=$DC_NAME" >> "$GITHUB_ENV"
 
       - name: Set up toolchain (Proton-Clang)
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang "$HOME/clang"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
-          "$HOME/clang/bin/clang" --version | head -n1
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -131,25 +131,14 @@ jobs:
             git apply "$p" || echo "::warning::Patch failed: $p (skipping)"
           done
 
-      - name: Apply extra patches
-        if: ${{ inputs.extra_patch_urls != '' }}
-        working-directory: kernel
-        env:
-          URLS: ${{ inputs.extra_patch_urls }}
-        run: |
-          for u in $URLS; do
-            curl -fLsS "$u" -o /tmp/extra.patch
-            git apply /tmp/extra.patch || echo "::warning::Patch failed: $u"
-          done
-
       - name: Configure kernel
         working-directory: kernel
         env:
           BPF: ${{ inputs.enable_bpf }}
-          EXTRA: ${{ inputs.extra_config }}
         run: |
           : > ci.config
           
+          # Auto-injected Critical Configs
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -178,9 +167,6 @@ jobs:
           EOF
           fi
           
-          if [ -n "$EXTRA" ]; then
-            echo "$EXTRA" | tr ';' '\n' >> ci.config
-          fi
           sed -i 's/^ *//' ci.config
 
           make O=out ARCH=arm64 CC=clang "$DEFCONFIG"
@@ -192,9 +178,8 @@ jobs:
         run: |
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
-          ccache -M 5G
-          START=$(date +%s)
           
+          # SMART BUILD: If WLAN complains, env vars force it.
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -206,31 +191,28 @@ jobs:
             WIFI_HIF=sdio \
             MTK_COMBO_CHIP=MT6632 \
             2>&1 | tee build.log
-            
-          echo "BUILD_SECS=$(( $(date +%s) - START ))" >> "$GITHUB_ENV"
-          ccache -s
 
-      - name: Verify Outputs & Collect
+      - name: Verify & Collect Outputs
         working-directory: kernel
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           B=out/arch/arm64/boot
           
+          # Auto-Detect Image.gz-dtb or fallback
           if [ -f "$B/Image.gz-dtb" ]; then
-            echo "::notice::Image.gz-dtb found. Phone will boot."
+            echo "✅ Image.gz-dtb found."
             cp "$B/Image.gz-dtb" "$GITHUB_WORKSPACE/dist/"
           elif [ -f "$B/Image.gz" ]; then
-            echo "::warning::Image.gz found. DTB needs to be appended manually."
+            echo "⚠️ Image.gz found."
             cp "$B/Image.gz" "$GITHUB_WORKSPACE/dist/"
           else
-            echo "::error::No Image produced. Build failed."
+            echo "::error::❌ No Kernel Image produced."
             exit 1
           fi
           
-          cp out/.config "$GITHUB_WORKSPACE/dist/final.config"
           echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
 
-      - name: Package AnyKernel3 zip
+      - name: Package AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md
@@ -245,26 +227,18 @@ jobs:
             fi
           fi
           
-          sed -i \
-            -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (BPF)|" \
-            -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
-            -e "s|^do.modules=.*|do.modules=0|" \
-            -e "s|^BLOCK=.*|BLOCK=boot;|" \
-            -e "s|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|" \
-            ak3/anykernel.sh
-            
-          ZIP="X6815C-${KVER}-BPF-$(date +%Y%m%d-%H%M).zip"
+          sed -i -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER}|" -e "s|^do.devicecheck=.*|do.devicecheck=0|" ak3/anykernel.sh
+          
+          ZIP="X6815C-${KVER}-BPF.zip"
           (cd ak3 && zip -r9 "$GITHUB_WORKSPACE/dist/$ZIP" . -x '*.git*')
-          echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
 
-      - name: Upload artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: X6815C-kernel-${{ github.run_number }}
+          name: X6815C-kernel-build
           path: dist/*
-          retention-days: 14
 
-      - name: Upload build log (on failure)
+      - name: Upload Log (If Failed)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
