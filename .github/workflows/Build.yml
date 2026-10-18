@@ -45,7 +45,7 @@ env:
 jobs:
   build:
     name: Build kernel
-    runs-on: ubuntu-22.04  # CHANGED: 20.04 queue is dead, 22.04 is instant
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
 
     steps:
@@ -74,6 +74,17 @@ jobs:
           fi
           cd kernel
           echo "Commit: $(git log -1 --format='%h %s')"
+
+      - name: Ensure KernelSU is removed
+        working-directory: kernel
+        run: |
+          # Agar pichle kisi run se drivers/kernelsu reh gaya hai, toh usko delete karo
+          if [ -d "drivers/kernelsu" ]; then
+            echo "Removing leftover KernelSU drivers..."
+            rm -rf drivers/kernelsu
+            # Makefile se bhi entry hatao agar hai
+            sed -i '/kernelsu/d' drivers/Makefile
+          fi
 
       - name: Resolve defconfig
         working-directory: kernel
@@ -132,7 +143,6 @@ jobs:
         run: |
           : > ci.config
           
-          # CRITICAL FIXES FOR MTK 4.19 COMPILATION & BOOT ON UBUNTU 22.04
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -178,7 +188,8 @@ jobs:
           ccache -M 5G
           START=$(date +%s)
           
-          # KCFLAGS includes -Wno-deprecated-declarations for OpenSSL 3.0 compatibility
+          # MediaTek WLAN Makefile reads WIFI_HIF and MTK_COMBO_CHIP from environment, NOT Kconfig.
+          # Passing them here explicitly fixes the "Unsuppoted HIF=!!" error.
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -187,6 +198,8 @@ jobs:
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump STRIP=llvm-strip \
             KCFLAGS="-Wno-error -Wno-deprecated-declarations" \
+            WIFI_HIF=sdio \
+            MTK_COMBO_CHIP=MT6632 \
             2>&1 | tee build.log
             
           echo "BUILD_SECS=$(( $(date +%s) - START ))" >> "$GITHUB_ENV"
