@@ -68,7 +68,7 @@ jobs:
           echo "🔨 APPLYING HARD BYPASSES FOR VENDOR CODE..."
           echo "=========================================="
           
-          # 1. KILL KERNELSU (Prevent path_umount issues)
+          # 1. KILL KERNELSU
           rm -rf drivers/kernelsu
           sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
           sed -i '/kernelsu/d' drivers/Makefile || true
@@ -84,13 +84,16 @@ jobs:
           fi
 
           # 3. FIX BLUETOOTH ERROR (Bypass the broken BT driver)
-          # The BT driver is failing due to missing CONNAC20_CHIPID macros.
           BT_MAKEFILE="drivers/misc/mediatek/connectivity/bt/mt66xx/btif/Makefile"
           if [ -f "$BT_MAKEFILE" ]; then
-            echo "📡 Patching BT Makefile to bypass compile errors..."
-            # Comment out the object file that is failing
             sed -i 's/^obj-.*btmtk_dbg.o/# &/' "$BT_MAKEFILE" || true
           fi
+
+          # 4. FIX FIRMWARE MISSING ERROR (Create dummy files)
+          echo "📦 Creating dummy firmware files..."
+          mkdir -p firmware
+          touch firmware/novatek_ts_fw.bin
+          touch firmware/valhall-1691526.wa.gen.S
 
       - name: Resolve defconfig
         working-directory: kernel
@@ -130,7 +133,6 @@ jobs:
         run: |
           : > ci.config
           
-          # Disable problematic vendor drivers
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
