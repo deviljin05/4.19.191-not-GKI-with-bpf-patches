@@ -1,4 +1,4 @@
-name: Build X6815C Kernel (Smart AutoHeal)
+name: Build X6815C Kernel (Production MTK)
 
 on:
   workflow_dispatch:
@@ -8,13 +8,9 @@ on:
         required: true
         default: "https://github.com/rag12ghu-design/android_kernel_infinix_X6815C"
       kernel_branch:
-        description: "Kernel branch (empty = repo default)"
+        description: "Kernel branch"
         required: false
         default: "main"
-      defconfig:
-        description: "Defconfig name (auto = detect)"
-        required: true
-        default: "auto"
       enable_bpf:
         description: "Enable BPF configs + apply patches"
         type: boolean
@@ -38,7 +34,7 @@ jobs:
   build:
     name: Build kernel
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout workflow repo
@@ -65,48 +61,23 @@ jobs:
             git clone --depth=1 "$REPO" kernel
           fi
 
-      # 🚀 AUTO-HEAL: Scans and fixes broken vendor leftovers
-      - name: Auto-Fix Source Tree
+      - name: Smart Source Auto-Fix
         working-directory: kernel
         run: |
-          echo "=========================================="
-          echo "🔍 SCANNING SOURCE FOR BROKEN ENTRIES..."
-          echo "=========================================="
-          
-          # 1. Check for missing KernelSU Folder
+          echo "🔍 Checking for broken KernelSU leftovers..."
           if [ ! -d "drivers/kernelsu" ]; then
-            echo "❌ drivers/kernelsu folder missing. Searching for leftover references..."
-            
-            # Clean Kconfig
-            if grep -q "drivers/kernelsu" drivers/Kconfig; then
-              echo "   -> Found leftover in drivers/Kconfig. Removing..."
-              sed -i '/drivers\/kernelsu/d' drivers/Kconfig
-            fi
-            
-            # Clean Makefile
-            if grep -q "kernelsu" drivers/Makefile; then
-              echo "   -> Found leftover in drivers/Makefile. Removing..."
-              sed -i '/kernelsu/d' drivers/Makefile
-            fi
-          else
-            echo "✅ drivers/kernelsu exists."
+            sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
+            sed -i '/kernelsu/d' drivers/Makefile || true
           fi
 
-          # 2. Verify Defconfig exists, if not, find closest match
-          DEFCONFIG_FILE=$(find arch/arm64/configs -maxdepth 1 -name '*X6815C*' -o -name '*6877*' | head -n 1)
-          if [ -z "$DEFCONFIG_FILE" ]; then
-            echo "⚠️ Exact X6815C defconfig not found. Picking first available..."
-            DEFCONFIG_FILE=$(find arch/arm64/configs -maxdepth 1 -name '*defconfig' | head -n 1)
-          fi
-          
-          if [ -z "$DEFCONFIG_FILE" ]; then
-            echo "::error::❌ CRITICAL: No defconfigs found in arch/arm64/configs"
-            exit 1
-          fi
-          
-          DC_NAME=$(basename "$DEFCONFIG_FILE")
-          echo "✅ Using Defconfig: $DC_NAME"
-          echo "DEFCONFIG=$DC_NAME" >> "$GITHUB_ENV"
+      - name: Resolve defconfig
+        working-directory: kernel
+        run: |
+          DC=$(ls arch/arm64/configs | grep -iE 'x6815c|6877' | head -n1 || true)
+          [ -z "$DC" ] && DC=$(ls arch/arm64/configs | grep -iE 'defconfig' | head -n1)
+          test -f "arch/arm64/configs/$DC" || { echo "::error::No defconfig found"; exit 1; }
+          echo "DEFCONFIG=$DC" >> "$GITHUB_ENV"
+          echo "✅ Using Defconfig: $DC"
 
       - name: Set up toolchain (Proton-Clang)
         run: |
@@ -127,8 +98,7 @@ jobs:
           shopt -s nullglob
           PATCHES=("$GITHUB_WORKSPACE"/patches/bpf/*.patch)
           for p in "${PATCHES[@]}"; do
-            echo ">> Applying $(basename "$p")"
-            git apply "$p" || echo "::warning::Patch failed: $p (skipping)"
+            git apply "$p" || echo "::warning::Patch failed: $p"
           done
 
       - name: Configure kernel
@@ -138,7 +108,6 @@ jobs:
         run: |
           : > ci.config
           
-          # Auto-injected Critical Configs
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -148,6 +117,7 @@ jobs:
           CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           CONFIG_BUILD_ARM64_DT_OVERLAY=y
           CONFIG_MTK_COMBO_WIFI_HIF=sdio
+          CONFIG_MODULES=y
           EOF
 
           if [ "$BPF" = "true" ]; then
@@ -168,18 +138,15 @@ jobs:
           fi
           
           sed -i 's/^ *//' ci.config
-
           make O=out ARCH=arm64 CC=clang "$DEFCONFIG"
           scripts/kconfig/merge_config.sh -m -O out out/.config ci.config
           make O=out ARCH=arm64 CC=clang olddefconfig
 
-      - name: Build kernel
+      - name: Build kernel & Modules
         working-directory: kernel
         run: |
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
-          
-          # SMART BUILD: If WLAN complains, env vars force it.
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -192,55 +159,84 @@ jobs:
             MTK_COMBO_CHIP=MT6632 \
             2>&1 | tee build.log
 
-      - name: Verify & Collect Outputs
+      - name: Collect Outputs (Image, DTB, Modules)
         working-directory: kernel
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           B=out/arch/arm64/boot
+          D="$GITHUB_WORKSPACE/dist"
           
-          # Auto-Detect Image.gz-dtb or fallback
+          # 1. Handle Kernel Image & DTB
           if [ -f "$B/Image.gz-dtb" ]; then
             echo "✅ Image.gz-dtb found."
-            cp "$B/Image.gz-dtb" "$GITHUB_WORKSPACE/dist/"
+            cp "$B/Image.gz-dtb" "$D/"
           elif [ -f "$B/Image.gz" ]; then
-            echo "⚠️ Image.gz found."
-            cp "$B/Image.gz" "$GITHUB_WORKSPACE/dist/"
+            echo "⚠️ Image.gz found. Checking DTB..."
+            cp "$B/Image.gz" "$D/"
+            if [ -f "$B/dtb" ]; then
+              cp "$B/dtb" "$D/dtb"
+            fi
+          elif [ -f "$B/Image" ]; then
+            echo "✅ Image found."
+            cp "$B/Image" "$D/"
           else
             echo "::error::❌ No Kernel Image produced."
             exit 1
           fi
           
+          # 2. Handle Modules (.ko) for MTK
+          echo "🔍 Finding .ko modules..."
+          find out -name "*.ko" -exec cp {} "$D/" \; 2>/dev/null || true
+          
+          cp out/.config "$D/final.config"
           echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
 
-      - name: Package AnyKernel3
+      - name: Package AnyKernel3 (Modules + DTB)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md
           D="$GITHUB_WORKSPACE/dist"
           
+          # Copy Image
           if [ -f "$D/Image.gz-dtb" ]; then
             cp "$D/Image.gz-dtb" ak3/
-          else
+          elif [ -f "$D/Image.gz" ]; then
             cp "$D/Image.gz" ak3/
-            if ls "$D"/*.dtb >/dev/null 2>&1; then
-              cat "$D"/*.dtb > ak3/dtb
-            fi
+          else
+            cp "$D/Image" ak3/
           fi
           
-          sed -i -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER}|" -e "s|^do.devicecheck=.*|do.devicecheck=0|" ak3/anykernel.sh
+          # Copy DTB if separate
+          [ -f "$D/dtb" ] && cp "$D/dtb" ak3/
           
-          ZIP="X6815C-${KVER}-BPF.zip"
+          # Inject Modules into AnyKernel3
+          if ls "$D"/*.ko >/dev/null 2>&1; then
+            mkdir -p ak3/modules
+            cp "$D"/*.ko ak3/modules/
+            echo "✅ Modules added to AnyKernel3."
+          fi
+          
+          # Update AnyKernel3 Script
+          sed -i \
+            -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (Production)|" \
+            -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
+            -e "s|^do.modules=.*|do.modules=1|" \
+            -e "s|^BLOCK=.*|BLOCK=boot;|" \
+            ak3/anykernel.sh
+            
+          ZIP="X6815C-${KVER}-Production.zip"
           (cd ak3 && zip -r9 "$GITHUB_WORKSPACE/dist/$ZIP" . -x '*.git*')
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: X6815C-kernel-build
+          name: X6815C-production-build
           path: dist/*
 
-      - name: Upload Log (If Failed)
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Publish Release
+        if: ${{ inputs.release }}
+        uses: softprops/action-gh-release@v2
         with:
-          name: build-log
-          path: kernel/build.log
+          tag_name: x6815c-${{ github.run_number }}
+          name: X6815C ${{ env.KVER }} (Production)
+          files: dist/*.zip
