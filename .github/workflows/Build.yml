@@ -10,7 +10,7 @@ on:
       kernel_branch:
         description: "Kernel branch (empty = repo default)"
         required: false
-        default: ""
+        default: "main"
       defconfig:
         description: "Defconfig name (auto = detect from arch/arm64/configs)"
         required: true
@@ -132,9 +132,11 @@ jobs:
         if: ${{ inputs.ksu == 'next' }}
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          # Non-GKI kernel (4.19) requires the "legacy" setup argument.
+          # Using "next" here will fail to patch correctly.
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           test -d drivers/kernelsu || test -d KernelSU-Next || { echo "::error::KernelSU-Next setup failed"; exit 1; }
-          git -C . status --short | head -20
+          git status --short | head -20
 
       - name: Apply BPF patches
         if: ${{ inputs.enable_bpf }}
@@ -178,6 +180,7 @@ jobs:
           if [ "$KSU" = "next" ]; then
             cat >> ci.config <<'EOF'
           CONFIG_KSU=y
+          CONFIG_KSU_KPROBE_HOOKS=y
           CONFIG_MODULES=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
@@ -271,7 +274,7 @@ jobs:
             -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (KernelSU: ${KSU})|" \
             -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
             -e "s|^do.modules=.*|do.modules=0|" \
-            -e "s|^BLOCK=.*|BLOCK=boot;|" \
+            -e "s|^BLOCK=.*|BLOCK=auto;|" \
             -e "s|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|" \
             ak3/anykernel.sh
           ZIP="X6815C-${KVER}-KSU-${KSU}-$(date +%Y%m%d-%H%M).zip"
