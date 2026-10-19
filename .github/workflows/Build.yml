@@ -74,22 +74,24 @@ jobs:
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' Makefile || true
 
-          # 2. FIX WLAN HIF ERROR (Direct Makefile Edit)
+          # 2. FIX WLAN HIF ERROR
           WLAN_MK="drivers/misc/mediatek/connectivity/wlan/core/gen4m/Makefile"
           if [ -f "$WLAN_MK" ]; then
             sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
             sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
             sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
             sed -i '/Unsuppoted HIF/d' "$WLAN_MK" || true
+            # Force include the hif_sdio.h path
+            sed -i 's|#include "hif.h"|#include "hif_sdio.h"|g' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h || true
           fi
 
-          # 3. FIX BLUETOOTH ERROR (Bypass the broken BT driver)
+          # 3. FIX BLUETOOTH ERROR
           BT_MAKEFILE="drivers/misc/mediatek/connectivity/bt/mt66xx/btif/Makefile"
           if [ -f "$BT_MAKEFILE" ]; then
             sed -i 's/^obj-.*btmtk_dbg.o/# &/' "$BT_MAKEFILE" || true
           fi
 
-          # 4. FIX FIRMWARE MISSING ERROR (Create dummy files)
+          # 4. FIX FIRMWARE MISSING ERROR
           echo "📦 Creating dummy firmware files..."
           mkdir -p firmware
           touch firmware/novatek_ts_fw.bin
@@ -133,6 +135,7 @@ jobs:
         run: |
           : > ci.config
           
+          # WIFI_HIF must be set as a string in Kconfig
           cat >> ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
@@ -141,10 +144,9 @@ jobs:
           CONFIG_WERROR=n
           CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           CONFIG_BUILD_ARM64_DT_OVERLAY=y
-          CONFIG_MTK_COMBO_WIFI_HIF=sdio
+          CONFIG_MTK_COMBO_WIFI_HIF="sdio"
           CONFIG_MTK_COMBO_CHIP=MT6632
           CONFIG_MODULES=y
-          # Disable BT to prevent compile failure
           CONFIG_MTK_COMBO_BT=n
           CONFIG_MTK_BTIF=n
           EOF
@@ -177,7 +179,7 @@ jobs:
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
           
-          # Force envs
+          # Force all WLAN variables
           export WIFI_HIF=sdio
           export HIF=sdio
           export MTK_COMBO_CHIP=MT6632
@@ -191,6 +193,7 @@ jobs:
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump STRIP=llvm-strip \
             KCFLAGS="-Wno-error -Wno-deprecated-declarations" \
+            WIFI_HIF=sdio \
             2>&1 | tee build.log
 
       - name: Collect Outputs (Image, DTB, Modules)
