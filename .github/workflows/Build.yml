@@ -12,7 +12,7 @@ on:
         required: false
         default: "main"
       enable_bpf:
-        description: "Enable BPF configs + apply patches"
+        description: "Enable BPF configs (Patches optional, skip if missing)"
         type: boolean
         default: true
       release:
@@ -61,50 +61,50 @@ jobs:
             git clone --depth=1 "$REPO" kernel
           fi
 
-      - name: Aggressive Vendor Fixes
+      - name: Safe Vendor Fixes (Conditional)
         working-directory: kernel
         run: |
           echo "=========================================="
-          echo "🔨 APPLYING HARD BYPASSES FOR VENDOR CODE..."
+          echo "Applying conditional fixes..."
           echo "=========================================="
-          
-          # 1. KILL KERNELSU
-          rm -rf drivers/kernelsu
-          sed -i '/drivers\/kernelsu/d' drivers/Kconfig || true
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          sed -i '/kernelsu/d' Makefile || true
 
-          # 2. FIX WLAN HIF ERROR
+          if [ -d "drivers/kernelsu" ]; then
+            echo "Removing KernelSU..."
+            rm -rf drivers/kernelsu
+            sed -i '/drivers\/kernelsu/d' drivers/Kconfig 2>/dev/null || true
+            sed -i '/kernelsu/d' drivers/Makefile 2>/dev/null || true
+          fi
+
           WLAN_MK="drivers/misc/mediatek/connectivity/wlan/core/gen4m/Makefile"
           if [ -f "$WLAN_MK" ]; then
-            sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
-            sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
-            sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
-            sed -i '/Unsuppoted HIF/d' "$WLAN_MK" || true
-            # Force include the hif_sdio.h path
-            sed -i 's|#include "hif.h"|#include "hif_sdio.h"|g' drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h || true
+            echo "Fixing WLAN HIF config..."
+            if grep -q "CONFIG_WIFI_HIF" "$WLAN_MK"; then
+              sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
+            fi
+            if grep -q "WIFI_HIF" "$WLAN_MK"; then
+              sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
+            fi
+            if grep -q "HIF" "$WLAN_MK"; then
+              sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
+            fi
           fi
 
-          # 3. FIX BLUETOOTH ERROR
-          BT_MAKEFILE="drivers/misc/mediatek/connectivity/bt/mt66xx/btif/Makefile"
-          if [ -f "$BT_MAKEFILE" ]; then
-            sed -i 's/^obj-.*btmtk_dbg.o/# &/' "$BT_MAKEFILE" || true
-          fi
-
-          # 4. FIX FIRMWARE MISSING ERROR
-          echo "📦 Creating dummy firmware files..."
-          mkdir -p firmware
-          touch firmware/novatek_ts_fw.bin
-          touch firmware/valhall-1691526.wa.gen.S
+          echo "Conditional fixes complete."
 
       - name: Resolve defconfig
         working-directory: kernel
         run: |
           DC=$(ls arch/arm64/configs | grep -iE 'x6815c|6877' | head -n1 || true)
-          [ -z "$DC" ] && DC=$(ls arch/arm64/configs | grep -iE 'defconfig' | head -n1)
-          test -f "arch/arm64/configs/$DC" || { echo "::error::No defconfig found"; exit 1; }
+          if [ -z "$DC" ]; then
+            DC=$(ls arch/arm64/configs | grep -iE 'defconfig' | head -n1 || true)
+          fi
+          if [ -z "$DC" ]; then
+            echo "::error::No defconfig found in arch/arm64/configs/"
+            ls arch/arm64/configs/
+            exit 1
+          fi
           echo "DEFCONFIG=$DC" >> "$GITHUB_ENV"
-          echo "✅ Using Defconfig: $DC"
+          echo "Using Defconfig: $DC"
 
       - name: Set up toolchain (Proton-Clang)
         run: |
@@ -118,14 +118,26 @@ jobs:
           key: ccache-x6815c-${{ github.run_id }}
           restore-keys: ccache-x6815c-
 
-      - name: Apply BPF patches
+      - name: Apply BPF patches (Optional, skip if missing)
         if: ${{ inputs.enable_bpf }}
         working-directory: kernel
         run: |
+          PATCH_DIR="$GITHUB_WORKSPACE/patches/bpf"
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "::warning::patches/bpf/ directory not found. Skipping BPF patches."
+            exit 0
+          fi
+
           shopt -s nullglob
-          PATCHES=("$GITHUB_WORKSPACE"/patches/bpf/*.patch)
+          PATCHES=("$PATCH_DIR"/*.patch)
+          if [ ${#PATCHES[@]} -eq 0 ]; then
+            echo "::warning::No .patch files in patches/bpf/. Skipping BPF patches."
+            exit 0
+          fi
+
           for p in "${PATCHES[@]}"; do
-            git apply "$p" || echo "::warning::Patch failed: $p"
+            echo "Applying: $(basename $p)"
+            git apply "$p" || echo "::warning::Patch failed: $p (continuing anyway)"
           done
 
       - name: Configure kernel
@@ -133,10 +145,7 @@ jobs:
         env:
           BPF: ${{ inputs.enable_bpf }}
         run: |
-          : > ci.config
-          
-          # WIFI_HIF must be set as a string in Kconfig
-          cat >> ci.config <<'EOF'
+          cat > ci.config <<'EOF'
           CONFIG_MODULE_SIG=n
           CONFIG_SYSTEM_TRUSTED_KEYS=""
           CONFIG_DEBUG_INFO=n
@@ -144,11 +153,7 @@ jobs:
           CONFIG_WERROR=n
           CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           CONFIG_BUILD_ARM64_DT_OVERLAY=y
-          CONFIG_MTK_COMBO_WIFI_HIF="sdio"
-          CONFIG_MTK_COMBO_CHIP=MT6632
           CONFIG_MODULES=y
-          CONFIG_MTK_COMBO_BT=n
-          CONFIG_MTK_BTIF=n
           EOF
 
           if [ "$BPF" = "true" ]; then
@@ -167,7 +172,7 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_BPF=y
           EOF
           fi
-          
+
           sed -i 's/^ *//' ci.config
           make O=out ARCH=arm64 CC=clang "$DEFCONFIG"
           scripts/kconfig/merge_config.sh -m -O out out/.config ci.config
@@ -178,13 +183,7 @@ jobs:
         run: |
           set -o pipefail
           export CCACHE_DIR="$HOME/.ccache"
-          
-          # Force all WLAN variables
-          export WIFI_HIF=sdio
-          export HIF=sdio
-          export MTK_COMBO_CHIP=MT6632
-          export MTK_CONNAC20_CHIPID=6877
-          
+
           make -j"$(nproc)" O=out ARCH=arm64 \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -193,7 +192,6 @@ jobs:
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump STRIP=llvm-strip \
             KCFLAGS="-Wno-error -Wno-deprecated-declarations" \
-            WIFI_HIF=sdio \
             2>&1 | tee build.log
 
       - name: Collect Outputs (Image, DTB, Modules)
@@ -202,7 +200,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           B=out/arch/arm64/boot
           D="$GITHUB_WORKSPACE/dist"
-          
+
           if [ -f "$B/Image.gz-dtb" ]; then
             cp "$B/Image.gz-dtb" "$D/"
           elif [ -f "$B/Image.gz" ]; then
@@ -211,13 +209,11 @@ jobs:
           elif [ -f "$B/Image" ]; then
             cp "$B/Image" "$D/"
           else
-            echo "::error::❌ No Kernel Image produced."
+            echo "::error::No Kernel Image produced. Check build.log"
             exit 1
           fi
-          
-          echo "🔍 Finding .ko modules..."
+
           find out -name "*.ko" -exec cp {} "$D/" \; 2>/dev/null || true
-          
           cp out/.config "$D/final.config"
           echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
 
@@ -226,29 +222,24 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md
           D="$GITHUB_WORKSPACE/dist"
-          
-          if [ -f "$D/Image.gz-dtb" ]; then
-            cp "$D/Image.gz-dtb" ak3/
-          elif [ -f "$D/Image.gz" ]; then
-            cp "$D/Image.gz" ak3/
-          else
-            cp "$D/Image" ak3/
-          fi
-          
+
+          if [ -f "$D/Image.gz-dtb" ]; then cp "$D/Image.gz-dtb" ak3/;
+          elif [ -f "$D/Image.gz" ]; then cp "$D/Image.gz" ak3/;
+          else cp "$D/Image" ak3/; fi
+
           [ -f "$D/dtb" ] && cp "$D/dtb" ak3/
-          
+
           if ls "$D"/*.ko >/dev/null 2>&1; then
-            mkdir -p ak3/modules
-            cp "$D"/*.ko ak3/modules/
+            mkdir -p ak3/modules && cp "$D"/*.ko ak3/modules/
           fi
-          
+
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=X6815C ${KVER} (Production)|" \
             -e "s|^do.devicecheck=.*|do.devicecheck=0|" \
             -e "s|^do.modules=.*|do.modules=1|" \
             -e "s|^BLOCK=.*|BLOCK=boot;|" \
             ak3/anykernel.sh
-            
+
           ZIP="X6815C-${KVER}-Production.zip"
           (cd ak3 && zip -r9 "$GITHUB_WORKSPACE/dist/$ZIP" . -x '*.git*')
 
