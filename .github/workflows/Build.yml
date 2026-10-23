@@ -68,6 +68,7 @@ jobs:
           echo "Applying conditional fixes..."
           echo "=========================================="
 
+          # KernelSU removal
           if [ -d "drivers/kernelsu" ]; then
             echo "Removing KernelSU..."
             rm -rf drivers/kernelsu
@@ -75,18 +76,16 @@ jobs:
             sed -i '/kernelsu/d' drivers/Makefile 2>/dev/null || true
           fi
 
+          # WLAN HIF fix - force WLAN_CHIP_ID and HIF at Makefile level
           WLAN_MK="drivers/misc/mediatek/connectivity/wlan/core/gen4m/Makefile"
           if [ -f "$WLAN_MK" ]; then
             echo "Fixing WLAN HIF config..."
-            if grep -q "CONFIG_WIFI_HIF" "$WLAN_MK"; then
-              sed -i 's/^CONFIG_WIFI_HIF=.*/CONFIG_WIFI_HIF=sdio/' "$WLAN_MK" || true
-            fi
-            if grep -q "WIFI_HIF" "$WLAN_MK"; then
-              sed -i 's/^WIFI_HIF=.*/WIFI_HIF=sdio/' "$WLAN_MK" || true
-            fi
-            if grep -q "HIF" "$WLAN_MK"; then
-              sed -i 's/^HIF=.*/HIF=sdio/' "$WLAN_MK" || true
-            fi
+            sed -i 's/^WLAN_CHIP_ID.*/WLAN_CHIP_ID = MT6632/' "$WLAN_MK" 2>/dev/null || true
+            sed -i 's/^HIF.*/HIF = sdio/' "$WLAN_MK" 2>/dev/null || true
+            sed -i 's/^CONFIG_MTK_COMBO_WIFI_HIF.*/CONFIG_MTK_COMBO_WIFI_HIF = sdio/' "$WLAN_MK" 2>/dev/null || true
+            echo "WLAN Makefile patched."
+          else
+            echo "WLAN Makefile not found at expected path, skipping."
           fi
 
           echo "Conditional fixes complete."
@@ -154,6 +153,9 @@ jobs:
           CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
           CONFIG_BUILD_ARM64_DT_OVERLAY=y
           CONFIG_MODULES=y
+          CONFIG_MTK_COMBO_WIFI_HIF="sdio"
+          CONFIG_MTK_COMBO_CHIP=MT6632
+          CONFIG_MTK_PLATFORM="mt6877"
           EOF
 
           if [ "$BPF" = "true" ]; then
